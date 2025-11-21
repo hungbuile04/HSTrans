@@ -22,6 +22,8 @@ gii = open('data/drug_side.pkl', 'rb')
 drug_side = pickle.load(gii)
 gii.close()
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 
 def Extract_positive_negative_samples(DAL, addition_negative_number=''):
     k = 0
@@ -361,7 +363,7 @@ if __name__ == '__main__':
     parser.add_argument('--wd', type=float, required=False, default=0.01, help='weight_decay')
     parser.add_argument('--epoch', type=int, required=False, default=200, help='Number of epoch')
     parser.add_argument('--log_interval', type=int, required=False, default=40, help='Log interval')
-    parser.add_argument('--cuda_name', type=str, required=False, default='cpu', help='Cuda')
+    parser.add_argument('--cuda_name', type=str, required=False, default='cuda', help='cpu/gpu')
     parser.add_argument('--dim', type=int, required=False, default=200,
                         help='features dimensions of drugs and side effects')
     parser.add_argument('--save_model', action='store_true', default=True, help='save model and features')
