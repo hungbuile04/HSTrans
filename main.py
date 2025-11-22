@@ -159,7 +159,7 @@ def trainfun(model, device, train_loader, optimizer, epoch, log_interval, test_l
 
         pred = out.to(device)
 
-        loss = loss_fun(pred.flatten(), Label).to('cpu')
+        loss = loss_fun(pred.flatten(), Label).to('cuda')
 
         loss.backward()
         optimizer.step()

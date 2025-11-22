@@ -5,29 +5,27 @@ import torch
 import numpy as np
 import pandas as pd
 import codecs
+
+# DEVICE global
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 try:
     from subword_nmt.apply_bpe import BPE
 except Exception:
-    # Fallback minimal BPE-like tokenizer when subword_nmt is not available.
-    # This fallback is intentionally simple: it splits the input into single-character tokens,
-    # which is a reasonable default for SMILES-like strings and avoids an import error.
     class BPE:
         def __init__(self, *args, **kwargs):
             pass
-
         def process_line(self, line):
             if line is None:
                 return ''
-            # For SMILES / short chemical strings, splitting into characters is a simple fallback.
             return ' '.join(list(line.strip()))
-
 
 class Trans(torch.nn.Module):
     def __init__(self):
         super(Trans, self).__init__()
 
-
-        self.device = 'cpu'
+        # dùng device global
+        self.device = DEVICE
 
         # activation and regularization
         self.relu = nn.ReLU()
@@ -67,63 +65,60 @@ class Trans(torch.nn.Module):
                                               transformer_attention_probs_dropout,
                                               transformer_hidden_dropout_rate)
 
-
         # 位置编码层
         self.position_embeddings = nn.Embedding(500, 200)
-
 
         self.dropout = 0.3
 
         self.decoder = nn.Sequential(
             nn.Linear(6912, 512),
             nn.ReLU(True),
-
             nn.BatchNorm1d(512),
             nn.Linear(512, 64),
             nn.ReLU(True),
-
             nn.BatchNorm1d(64),
             nn.Linear(64, 32),
             nn.ReLU(True),
-
-            # output layer
             nn.Linear(32, 1)
         )
 
         self.icnn = nn.Conv2d(1, 3, 3, padding=0)
-
         self.CrossAttention = False
+
+        # chuyển toàn bộ module lên device ngay khi khởi tạo
+        # (điều này đảm bảo tất cả tham số/embedding nằm trên cùng device)
+        self.to(self.device)
 
     def forward(self, Drug, SE, DrugMask, SEMsak):
 
         batch = Drug.size(0)
 
-        # 子结构编码
+        # đảm bảo các tensors input là LongTensor/FloatTensor rồi chuyển sang device
+        # (nếu bạn đã chuyển batch trong training loop thì .to() ở đây vẫn an toàn)
         Drug = Drug.long().to(self.device)
         DrugMask = DrugMask.long().to(self.device)
         DrugMask = DrugMask.unsqueeze(1).unsqueeze(2)
         DrugMask = (1.0 - DrugMask) * -10000.0
-        emb = self.embDrug(Drug)
+
+        emb = self.embDrug(Drug)  # embDrug đã ở device vì self.to(self.device) ở __init__
         encoded_layers = self.encoderDrug(emb.float(), DrugMask.float(), False)
         x_d = encoded_layers
 
-        # 副作用-子结构编码
         SE = SE.long().to(self.device)
         SEMsak = SEMsak.long().to(self.device)
         SEMsak = SEMsak.unsqueeze(1).unsqueeze(2)
         SEMsak = (1.0 - SEMsak) * -10000.0
+
         embE = self.embSide(SE)
         encoded_layers = self.encoderSide(embE.float(), SEMsak.float(), False)
         x_e = encoded_layers
 
         if self.CrossAttention:
-            x_d, x_e = self.crossAttentionencoder([x_d.float(),x_e.float()], DrugMask.float(), True)
-
+            x_d, x_e = self.crossAttentionencoder([x_d.float(), x_e.float()], DrugMask.float(), True)
 
         # interaction
         d_aug = torch.unsqueeze(x_d, 2).repeat(1, 1, 50, 1)
         e_aug = torch.unsqueeze(x_e, 1).repeat(1, 50, 1, 1)
-
 
         i = d_aug * e_aug
         i_v = i.permute(0, 3, 1, 2)
@@ -132,12 +127,11 @@ class Trans(torch.nn.Module):
         i_v = F.dropout(i_v, p=self.dropout)
 
         f = self.icnn(i_v)
-
         f = f.view(int(batch), -1)
-
         score = self.decoder(f)
 
         return score, Drug, SE
+
 
 
 def drug2emb_encoder(smile):
