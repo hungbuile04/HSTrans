@@ -304,29 +304,51 @@ def main(training_generator, testing_generator, modeling, lr, num_epoch, weight_
     print("正在预测")
     test_labels, test_preds = predict(model=model, device=device, test_loader=testing_generator)
 
-
     np.save(f'predictResult/total_labels_{k}.npy', test_labels)
     np.save(f'predictResult/total_preds_{k}.npy', test_preds)
 
-
+    # only 2 metrics returned here
     ret_test = [rmse(test_labels, test_preds), MAE(test_labels, test_preds)]
 
-    test_pearsons, test_rMSE, test_spearman, test_MAE = ret_test[1], ret_test[2], ret_test[3], ret_test[4]
+    # unpack correctly
+    test_rMSE, test_MAE = ret_test
 
     print("正在评估")
-    auc_all, aupr_all, drugAUC, drugAUPR, precision, recall, accuracy = evaluate(model=model, device=device,
-                                                                                 test_loader=testing_generator)
 
-    result = [test_pearsons, test_rMSE, test_spearman, test_MAE, auc_all, aupr_all, drugAUC, drugAUPR, precision,
-              recall, accuracy]
+    # evaluate() returns 7 metrics
+    auc_all, aupr_all, drugAUC, drugAUPR, precision, recall, accuracy = evaluate(
+        model=model, device=device, test_loader=testing_generator
+    )
 
-    print('Test:\nPearson: {:.5f}\trMSE: {:.5f}\tSpearman: {:.5f}\tMAE: {:.5f}'.format(result[0], result[1], result[2],
-                                                                                       result[3]))
+    # combine everything (2 + 7 = 9 values)
+    result = [
+        test_rMSE,  # 0
+        test_MAE,   # 1
+        auc_all,    # 2
+        aupr_all,   # 3
+        drugAUC,    # 4
+        drugAUPR,   # 5
+        precision,  # 6
+        recall,     # 7
+        accuracy    # 8
+    ]
+
+    # ---- FIX PRINTING ----
+    print('Test:\trMSE: {:.5f}\tMAE: {:.5f}'.format(result[0], result[1]))
+
+    # these indexes must match result list (0..8)
     print(
-        '\tall AUC: {:.5f}\tall AUPR: {:.5f}\tdrug AUC: {:.5f}\tdrug AUPR: {:.5f}\tdrug Precise: {:.5f}\tRecall: {:.5f}\tdrug ACC: {:.5f}'.format(
-            result[4], result[5],
-            result[6], result[7], result[8], result[9], result[10]))
-
+        '\tall AUC: {:.5f}\tall AUPR: {:.5f}\tdrug AUC: {:.5f}\tdrug AUPR: {:.5f}\t'
+        'Precise: {:.5f}\tRecall: {:.5f}\tACC: {:.5f}'.format(
+            result[2],  # auc_all
+            result[3],  # aupr_all
+            result[4],  # drugAUC
+            result[5],  # drugAUPR
+            result[6],  # precision
+            result[7],  # recall
+            result[8]   # accuracy
+        )
+    )
 
 class Data_Encoder(data.Dataset):
     def __init__(self, list_IDs, labels, df_dti, k):
