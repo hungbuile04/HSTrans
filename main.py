@@ -70,21 +70,18 @@ def quantization_loss(y_hat, gamma=10.0, lam=0.05):
 # y_reg: (B,) floats (model regression output)
 # logits: (B,5) class logits (model classification head)
 # labels: (B,) ints in {1,2,3,4,5}
-def hybrid_loss(y_reg, logits, labels, alpha=1.0, beta=0.5, gamma=10.0, lam=0.05):
-    # ensure device consistency
+# Hybrid đơn giản: MSE + quantization (CHỈ 2 THAM SỐ: y_reg, labels)
+def hybrid_loss(y_reg, labels, alpha=1.0, gamma=10.0, lam=0.05):
     device = y_reg.device
     labels = labels.to(device)
 
-    # MSE (use mean, not sum)
+    # MSE trung bình
     mse = F.mse_loss(y_reg, labels.float())
 
-    # CE (convert labels 1..5 -> 0..4)
-    ce = F.cross_entropy(logits, labels.long() - 1)
-
-    # quantization
+    # Quantization loss
     ql = quantization_loss(y_reg, gamma=gamma, lam=lam)
 
-    loss = alpha * mse + beta * ce + ql
+    loss = alpha * mse + ql
     return loss
 
 
@@ -183,24 +180,25 @@ def trainfun(model, device, train_loader, optimizer, epoch, log_interval, test_l
 
         DrugMask = DrugMask.to(device)
         SEMsak = SEMsak.to(device)
-        Label = torch.FloatTensor([int(item) for item in Label])
+        Label = torch.FloatTensor([int(item) for item in Label]).to(device)
 
         optimizer.zero_grad()
         out, _, _ = model(Drug, SE, DrugMask, SEMsak)
 
         pred = out.to(device)
 
-        loss = loss_fun(pred.flatten(), Label)
+        loss = hybrid_loss(pred.flatten(), Label)
 
         loss.backward()
         optimizer.step()
         avg_loss.append(loss.item())
 
         if batch_idx % 100 == 0:
-            print('Train epoch: {} ({:.0f}%)]\tLoss: {:.6f}'.format(epoch, len(train_loader.dataset),
-                                                                    100. * (batch_idx + 1) / len(
-                                                                        train_loader),
-                                                                    loss.item()))
+            print('Train epoch: {} ({:.0f}%)]\tLoss: {:.6f}'.format(
+                epoch, len(train_loader.dataset),
+                100. * (batch_idx + 1) / len(train_loader),
+                loss.item()
+            ))
             print(loss)
 
     return sum(avg_loss) / len(avg_loss)
