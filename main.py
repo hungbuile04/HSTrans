@@ -56,6 +56,37 @@ def loss_fun(output, label):
     loss = torch.sum((output - label) ** 2)
     return loss
 
+# Quantization loss (soft-min to nearest integer 1..5)
+def quantization_loss(y_hat, gamma=10.0, lam=0.05):
+    # y_hat: tensor shape (B,) continuous outputs
+    ks = torch.arange(1, 6, device=y_hat.device).float()   # [1,2,3,4,5]
+    d = torch.abs(y_hat.unsqueeze(1) - ks.unsqueeze(0))   # (B,5)
+    w = torch.exp(-gamma * d)                             # (B,5)
+    w = w / (w.sum(dim=1, keepdim=True) + 1e-12)          # normalize
+    lq = (w * d).sum(dim=1).mean()                        # mean over batch
+    return lam * lq
+
+# Hybrid loss: MSE + CE + quantization
+# y_reg: (B,) floats (model regression output)
+# logits: (B,5) class logits (model classification head)
+# labels: (B,) ints in {1,2,3,4,5}
+def hybrid_loss(y_reg, logits, labels, alpha=1.0, beta=0.5, gamma=10.0, lam=0.05):
+    # ensure device consistency
+    device = y_reg.device
+    labels = labels.to(device)
+
+    # MSE (use mean, not sum)
+    mse = F.mse_loss(y_reg, labels.float())
+
+    # CE (convert labels 1..5 -> 0..4)
+    ce = F.cross_entropy(logits, labels.long() - 1)
+
+    # quantization
+    ql = quantization_loss(y_reg, gamma=gamma, lam=lam)
+
+    loss = alpha * mse + beta * ce + ql
+    return loss
+
 
 def identify_sub(data, k):
     print('正在提取有效子结构')
@@ -159,7 +190,7 @@ def trainfun(model, device, train_loader, optimizer, epoch, log_interval, test_l
 
         pred = out.to(device)
 
-        loss = loss_fun(pred.flatten(), Label).to('cuda')
+        loss = loss_fun(pred.flatten(), Label)
 
         loss.backward()
         optimizer.step()
@@ -356,6 +387,9 @@ class Data_Encoder(data.Dataset):
         self.list_IDs = list_IDs
         self.df = df_dti
         self.k = k
+        # >>>> thêm 2 dòng này (load 1 lần) <<<<
+        self.SE_index = np.load("data/sub/SE_sub_index_50_2.npy").astype(int)
+        self.SE_mask  = np.load("data/sub/SE_sub_mask_50_2.npy")
 
     def __len__(self):
         return len(self.list_IDs)
@@ -365,14 +399,12 @@ class Data_Encoder(data.Dataset):
         d = self.df.iloc[index]['Drug_smile']
         s = int(self.df.iloc[index]['SE_id'])
 
-        # d_v = drug2single_vector(d)
         d_v, input_mask_d = drug2emb_encoder(d)
 
-        # 副作用的子结构是读取出来的
-        SE_index = np.load(f"data/sub/SE_sub_index_50_2.npy").astype(int)
-        SE_mask = np.load(f"data/sub/SE_sub_mask_50_2.npy")
-        s_v = SE_index[s, :]
-        input_mask_s = SE_mask[s, :]
+        # dùng biến đã load sẵn
+        s_v = self.SE_index[s, :]
+        input_mask_s = self.SE_mask[s, :]
+
         y = self.labels[index]
         return d_v, s_v, input_mask_d, input_mask_s, y
 
@@ -435,7 +467,7 @@ if __name__ == '__main__':
     fold = 1
     kfold = StratifiedKFold(10, random_state=1, shuffle=True)
 
-    params = {'batch_size': 128,
+    params = {'batch_size': 256,
               'shuffle': True}
 
     identify_sub(data, 0)

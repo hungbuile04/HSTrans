@@ -89,6 +89,65 @@ class Trans(torch.nn.Module):
         # (điều này đảm bảo tất cả tham số/embedding nằm trên cùng device)
         self.to(self.device)
 
+    def crossAttention_simple(self, x_d, x_e, mask_d=None, mask_e=None, return_attn=False):
+        """
+        Cross-attention đơn giản (single-head) giữa Drug (x_d) và SE (x_e).
+
+        x_d: [B, Nd, D]  - drug embeddings
+        x_e: [B, Ns, D]  - SE embeddings
+        mask_d: [B, Nd]  - 1 = real / 0 = pad
+        mask_e: [B, Ns]  - 1 = real / 0 = pad
+        return_attn: nếu True → trả cả attention weights xoay chiều
+
+        Trả về:
+            x_d_new: drug embeddings đã contextualized bằng SE
+            x_e_new: SE embeddings đã contextualized bằng drug
+        """
+
+        B, Nd, D = x_d.shape
+        _, Ns, _ = x_e.shape
+
+        # ---- 1) Chuẩn hóa mask ----
+        # mask Additive kiểu HSTrans: (1-mask)*(-10000)
+        if mask_d is not None and mask_d.dim() == 4:    # [B,1,1,Nd]
+            mask_d = (mask_d.squeeze(1).squeeze(1) == 0)  # True = pad
+        elif mask_d is not None:
+            mask_d = (mask_d == 0)
+
+        if mask_e is not None and mask_e.dim() == 4:    # [B,1,1,Ns]
+            mask_e = (mask_e.squeeze(1).squeeze(1) == 0)
+        elif mask_e is not None:
+            mask_e = (mask_e == 0)
+
+        # fallback: không mask
+        if mask_d is None:
+            mask_d = torch.zeros((B, Nd), dtype=torch.bool, device=x_d.device)
+        if mask_e is None:
+            mask_e = torch.zeros((B, Ns), dtype=torch.bool, device=x_e.device)
+
+        # ---- 2) Drug (Q) → SE (K,V) ----
+        # Attention(Q=x_d, K=x_e, V=x_e)
+        scores_de = torch.matmul(x_d, x_e.transpose(-2, -1)) / math.sqrt(D)   # [B,Nd,Ns]
+        # mask các vị trí SE = pad
+        scores_de = scores_de.masked_fill(mask_e.unsqueeze(1), float('-1e9'))
+        attn_de = torch.softmax(scores_de, dim=-1)                             # [B,Nd,Ns]
+        context_d = torch.matmul(attn_de, x_e)                                 # [B,Nd,D]
+        x_d_new = x_d + context_d                                              # residual
+        x_d_new = F.layer_norm(x_d_new, (D,))                                  # LN
+
+        # ---- 3) SE (Q) → Drug (K,V) ----
+        scores_ed = torch.matmul(x_e, x_d.transpose(-2, -1)) / math.sqrt(D)   # [B,Ns,Nd]
+        scores_ed = scores_ed.masked_fill(mask_d.unsqueeze(1), float('-1e9'))
+        attn_ed = torch.softmax(scores_ed, dim=-1)
+        context_e = torch.matmul(attn_ed, x_d)
+        x_e_new = x_e + context_e
+        x_e_new = F.layer_norm(x_e_new, (D,))
+
+        if return_attn:
+            return x_d_new, x_e_new, attn_de, attn_ed
+
+        return x_d_new, x_e_new
+
     def forward(self, Drug, SE, DrugMask, SEMsak):
 
         batch = Drug.size(0)
@@ -114,7 +173,18 @@ class Trans(torch.nn.Module):
         x_e = encoded_layers
 
         if self.CrossAttention:
-            x_d, x_e = self.crossAttentionencoder([x_d.float(), x_e.float()], DrugMask.float(), True)
+            # x_d, x_e = self.crossAttentionencoder([x_d.float(), x_e.float()], DrugMask.float(), True)
+            # chuyển mask additive thành mask nhị phân 1/0
+            mask_d = (DrugMask.squeeze(1).squeeze(1) != -10000).long()
+            mask_e = (SEMsak.squeeze(1).squeeze(1) != -10000).long()
+
+            x_d, x_e = self.crossAttention_simple(
+                x_d.float(),
+                x_e.float(),
+                mask_d=mask_d,
+                mask_e=mask_e,
+                return_attn=False      # đặt True nếu bạn muốn attention weights
+            )
 
         # interaction
         d_aug = torch.unsqueeze(x_d, 2).repeat(1, 1, 50, 1)
