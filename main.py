@@ -304,78 +304,102 @@ def main(training_generator, testing_generator, modeling, lr, num_epoch, weight_
     model_st = modeling.__name__
     train_losses = []
 
-    # 确定设备
+    # Thiết bị
     print('CPU/GPU: ', torch.cuda.is_available())
     device = torch.device(cuda_name if torch.cuda.is_available() else 'cpu')
     print('Device: ', device)
 
-    # 模型初始化
+    # Khởi tạo model
     model = modeling().to(device)
 
-    # 计算模型的参数总数
+    # Đếm số lượng tham số
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f'Total parameters: {total_params}')
 
-    # 创建优化器
+    # Optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     for epoch in range(num_epoch):
-        train_loss = trainfun(model=model, device=device,
-                              train_loader=training_generator,
-                              optimizer=optimizer, epoch=epoch + 1, log_interval=log_interval,
-                              test_loader=testing_generator)
+        # ==== TRAIN ====
+        train_loss = trainfun(
+            model=model,
+            device=device,
+            train_loader=training_generator,
+            optimizer=optimizer,
+            epoch=epoch + 1,
+            log_interval=log_interval,
+            test_loader=testing_generator
+        )
         train_losses.append(train_loss)
 
-        if epoch % 50 == 0:
+        # ==== Mỗi 50 epoch: lưu + đánh giá đầy đủ ====
+        if (epoch + 1) % 50 == 0:
             checkpointsFolder = 'checkpoints/'
-            torch.save(model.state_dict(), checkpointsFolder + f'{k}' + str(epoch))
+            torch.save(model.state_dict(), checkpointsFolder + f'{k}' + f'_epoch{epoch+1}.pt')
 
+            print(f"\n===== Epoch {epoch + 1} summary =====")
+            print(f"Train Loss: {train_loss:.5f}")
+
+            # ---- PREDICT ----
+            test_labels, test_preds = predict(
+                model=model,
+                device=device,
+                test_loader=testing_generator
+            )
+
+            test_rMSE = rmse(test_labels, test_preds)
+            test_MAE = MAE(test_labels, test_preds)
+
+            # ---- EVALUATE ----
+            auc_all, aupr_all, drugAUC, drugAUPR, precision, recall, accuracy = evaluate(
+                model=model,
+                device=device,
+                test_loader=testing_generator
+            )
+
+            print('Intermediate Test:\trMSE: {:.5f}\tMAE: {:.5f}'.format(test_rMSE, test_MAE))
+            print(
+                '\tall AUC: {:.5f}\tall AUPR: {:.5f}\tdrug AUC: {:.5f}\t'
+                'drug AUPR: {:.5f}\tPrecise: {:.5f}\tRecall: {:.5f}\tACC: {:.5f}'.format(
+                    auc_all, aupr_all, drugAUC, drugAUPR, precision, recall, accuracy
+                )
+            )
+
+    # ================= FINAL PREDICTION SAU KHI TRAIN XONG =================
     print("正在预测")
     test_labels, test_preds = predict(model=model, device=device, test_loader=testing_generator)
 
     np.save(f'predictResult/total_labels_{k}.npy', test_labels)
     np.save(f'predictResult/total_preds_{k}.npy', test_preds)
 
-    # only 2 metrics returned here
-    ret_test = [rmse(test_labels, test_preds), MAE(test_labels, test_preds)]
-
-    # unpack correctly
-    test_rMSE, test_MAE = ret_test
+    test_rMSE = rmse(test_labels, test_preds)
+    test_MAE = MAE(test_labels, test_preds)
 
     print("正在评估")
 
-    # evaluate() returns 7 metrics
     auc_all, aupr_all, drugAUC, drugAUPR, precision, recall, accuracy = evaluate(
         model=model, device=device, test_loader=testing_generator
     )
 
-    # combine everything (2 + 7 = 9 values)
     result = [
-        test_rMSE,  # 0
-        test_MAE,   # 1
-        auc_all,    # 2
-        aupr_all,   # 3
-        drugAUC,    # 4
-        drugAUPR,   # 5
-        precision,  # 6
-        recall,     # 7
-        accuracy    # 8
+        test_rMSE,   # 0
+        test_MAE,    # 1
+        auc_all,     # 2
+        aupr_all,    # 3
+        drugAUC,     # 4
+        drugAUPR,    # 5
+        precision,   # 6
+        recall,      # 7
+        accuracy     # 8
     ]
 
-    # ---- FIX PRINTING ----
-    print('Test:\trMSE: {:.5f}\tMAE: {:.5f}'.format(result[0], result[1]))
-
-    # these indexes must match result list (0..8)
+    # ---- IN KẾT QUẢ CUỐI ----
+    print('Final Test:\trMSE: {:.5f}\tMAE: {:.5f}'.format(result[0], result[1]))
     print(
         '\tall AUC: {:.5f}\tall AUPR: {:.5f}\tdrug AUC: {:.5f}\tdrug AUPR: {:.5f}\t'
         'Precise: {:.5f}\tRecall: {:.5f}\tACC: {:.5f}'.format(
-            result[2],  # auc_all
-            result[3],  # aupr_all
-            result[4],  # drugAUC
-            result[5],  # drugAUPR
-            result[6],  # precision
-            result[7],  # recall
-            result[8]   # accuracy
+            result[2], result[3], result[4],
+            result[5], result[6], result[7], result[8]
         )
     )
 
@@ -466,7 +490,8 @@ if __name__ == '__main__':
     kfold = StratifiedKFold(10, random_state=1, shuffle=True)
 
     params = {'batch_size': 256,
-              'shuffle': True}
+              'shuffle': True,
+              'num_workers': 4}
 
     identify_sub(data, 0)
 
