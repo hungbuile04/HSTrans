@@ -71,18 +71,14 @@ def quantization_loss(y_hat, gamma=10.0, lam=0.05):
 # logits: (B,5) class logits (model classification head)
 # labels: (B,) ints in {1,2,3,4,5}
 # Hybrid đơn giản: MSE + quantization (CHỈ 2 THAM SỐ: y_reg, labels)
-def hybrid_loss(y_reg, labels, alpha=1.0, gamma=10.0, lam=0.05):
-    device = y_reg.device
-    labels = labels.to(device)
+def hybrid_loss(output, labels, gamma=1.5, lam=0.2, alpha=1.0):
+    output = output.to('cuda')
+    labels = labels.to('cuda')
 
-    # MSE trung bình
-    mse = F.mse_loss(y_reg, labels.float())
+    base_loss = torch.sum((output - labels) ** 2)  # y hệt loss_fun cũ
+    ql = quantization_loss(output, gamma=gamma, lam=lam)
 
-    # Quantization loss
-    ql = quantization_loss(y_reg, gamma=gamma, lam=lam)
-
-    loss = alpha * mse + ql
-    return loss
+    return alpha * base_loss + ql
 
 
 def identify_sub(data, k):
