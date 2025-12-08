@@ -51,10 +51,8 @@ def Extract_positive_negative_samples(DAL, addition_negative_number=''):
 
 
 def loss_fun(output, label):
-    output = output.to('cuda')
-    label = label.to('cuda')
-    loss = torch.sum((output - label) ** 2)
-    return loss
+    # output, label đã ở đúng device rồi, không .to nữa
+    return torch.sum((output - label) ** 2)
 
 # Quantization loss (soft-min to nearest integer 1..5)
 def quantization_loss(y_hat, gamma=10.0, lam=0.05):
@@ -165,37 +163,35 @@ def identify_sub(data, k):
 
 
 def trainfun(model, device, train_loader, optimizer, epoch, log_interval, test_loader):
-    # 确定训练集的数量
     print('Training on {} samples...'.format(len(train_loader.dataset)))
-
-    # 开启训练模式
     model.train()
     avg_loss = []
 
     for batch_idx, (Drug, SE, DrugMask, SEMsak, Label) in enumerate(train_loader):
-
-        DrugMask = DrugMask.to(device)
-        SEMsak = SEMsak.to(device)
-        Label = torch.FloatTensor([int(item) for item in Label]).to(device)
+        Drug      = Drug.to(device, non_blocking=True)
+        SE        = SE.to(device, non_blocking=True)
+        DrugMask  = DrugMask.to(device, non_blocking=True)
+        SEMsak    = SEMsak.to(device, non_blocking=True)
+        Label     = torch.FloatTensor([int(item) for item in Label]).to(device, non_blocking=True)
 
         optimizer.zero_grad()
-        out, _, _ = model(Drug, SE, DrugMask, SEMsak)
+        out, _, _ = model(Drug, SE, DrugMask, SEMsak)  # mọi thứ đã trên GPU
+        pred = out  # không cần .to(device) nữa
 
-        pred = out.to(device)
-
-        loss = hybrid_loss(pred.flatten(), Label)
+        loss = hybrid_loss(pred.flatten(), Label)  # hoặc loss_fun
 
         loss.backward()
         optimizer.step()
         avg_loss.append(loss.item())
 
-        if batch_idx % 100 == 0:
-            print('Train epoch: {} ({:.0f}%)]\tLoss: {:.6f}'.format(
-                epoch, len(train_loader.dataset),
+        if batch_idx % log_interval == 0:
+            print('Train epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
+                epoch,
+                (batch_idx + 1) * len(Label),
+                len(train_loader.dataset),
                 100. * (batch_idx + 1) / len(train_loader),
                 loss.item()
             ))
-            print(loss)
 
     return sum(avg_loss) / len(avg_loss)
 
@@ -485,9 +481,9 @@ if __name__ == '__main__':
     fold = 1
     kfold = StratifiedKFold(10, random_state=1, shuffle=True)
 
-    params = {'batch_size': 256,
+    params = {'batch_size': 128,
               'shuffle': True,
-              'num_workers': 4}
+              'num_workers': 8}
 
     identify_sub(data, 0)
 
