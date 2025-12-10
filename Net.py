@@ -31,7 +31,7 @@ class Trans(torch.nn.Module):
         self.relu = nn.ReLU()
 
         input_dim_drug = 2586
-        transformer_emb_size_drug = 300
+        transformer_emb_size_drug = 304
         transformer_dropout_rate = 0.1
         transformer_n_layer_drug = 8
         transformer_intermediate_size_drug = 512
@@ -193,7 +193,7 @@ class Trans(torch.nn.Module):
         i = d_aug * e_aug
         i_v = i.permute(0, 3, 1, 2)
         i_v = torch.sum(i_v, dim=1)
-        i_v = i_v / (self.embDrug.embedding_dim ** 0.5) # Scale giống Attention
+        # i_v = i_v / (self.embDrug.embedding_dim ** 0.5) # Scale giống Attention
         i_v = torch.unsqueeze(i_v, 1)
         i_v = F.dropout(i_v, p=self.dropout)
 
