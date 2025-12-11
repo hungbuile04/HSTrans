@@ -311,6 +311,8 @@ def main(training_generator, testing_generator, modeling, lr, num_epoch, weight_
     # Optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
+    best_rmse = 1e9
+    best_epoch = -1
     for epoch in range(num_epoch):
         # ==== TRAIN ====
         train_loss = trainfun(
@@ -325,37 +327,41 @@ def main(training_generator, testing_generator, modeling, lr, num_epoch, weight_
         train_losses.append(train_loss)
 
         # ==== Mỗi 50 epoch: lưu + đánh giá đầy đủ ====
-        if (epoch + 1) % 50 == 0:
-            checkpointsFolder = 'checkpoints/'
-            torch.save(model.state_dict(), checkpointsFolder + f'{k}' + f'_epoch{epoch+1}.pt')
+        # if (epoch + 1) % 10 == 0:
+            # checkpointsFolder = 'checkpoints/'
+            # torch.save(model.state_dict(), checkpointsFolder + f'{k}' + f'_epoch{epoch+1}.pt')
 
-            print(f"\n===== Epoch {epoch + 1} summary =====")
-            print(f"Train Loss: {train_loss:.5f}")
+        print(f"\n===== Epoch {epoch + 1} summary =====")
+        print(f"Train Loss: {train_loss:.5f}")
 
-            # ---- PREDICT ----
-            test_labels, test_preds = predict(
-                model=model,
-                device=device,
-                test_loader=testing_generator
-            )
+        # ---- PREDICT ----
+        test_labels, test_preds = predict(
+            model=model,
+            device=device,
+            test_loader=testing_generator
+        )
 
-            test_rMSE = rmse(test_labels, test_preds)
-            test_MAE = MAE(test_labels, test_preds)
+        test_rMSE = rmse(test_labels, test_preds)
+        test_MAE = MAE(test_labels, test_preds)
 
-            # ---- EVALUATE ----
-            auc_all, aupr_all, drugAUC, drugAUPR, precision, recall, accuracy = evaluate(
-                model=model,
-                device=device,
-                test_loader=testing_generator
-            )
+        if test_rMSE < best_rmse:
+            best_rmse = test_rMSE
+            best_epoch = epoch + 1
 
-            print('Intermediate Test:\trMSE: {:.5f}\tMAE: {:.5f}'.format(test_rMSE, test_MAE))
-            print(
-                '\tall AUC: {:.5f}\tall AUPR: {:.5f}\tdrug AUC: {:.5f}\t'
-                'drug AUPR: {:.5f}\tPrecise: {:.5f}\tRecall: {:.5f}\tACC: {:.5f}'.format(
-                    auc_all, aupr_all, drugAUC, drugAUPR, precision, recall, accuracy
-                )
-            )
+        # ---- EVALUATE ----
+        auc_all, aupr_all, drugAUC, drugAUPR, precision, recall, accuracy = evaluate(
+            model=model,
+            device=device,
+            test_loader=testing_generator
+        )
+
+        print('Intermediate Test:\trMSE: {:.5f}\tMAE: {:.5f}'.format(test_rMSE, test_MAE))
+        # print(
+        #     '\tall AUC: {:.5f}\tall AUPR: {:.5f}\tdrug AUC: {:.5f}\t'
+        #     'drug AUPR: {:.5f}\tPrecise: {:.5f}\tRecall: {:.5f}\tACC: {:.5f}'.format(
+        #         auc_all, aupr_all, drugAUC, drugAUPR, precision, recall, accuracy
+        #     )
+        # )
 
     # ================= FINAL PREDICTION SAU KHI TRAIN XONG =================
     print("正在预测")
@@ -394,6 +400,8 @@ def main(training_generator, testing_generator, modeling, lr, num_epoch, weight_
             result[5], result[6], result[7], result[8]
         )
     )
+    print(f"\n>>>>> FOLD {k} FINISHED")
+    print(f">>>>> BEST RMSE: {best_rmse:.5f} at epoch {best_epoch}\n")
 
 class Data_Encoder(data.Dataset):
     def __init__(self, list_IDs, labels, df_dti, k):
