@@ -437,10 +437,10 @@ if __name__ == '__main__':
     parser.add_argument('--model', type=int, required=False, default=0)
     parser.add_argument('--lr', type=float, required=False, default=1e-4, help='Learning rate')
     parser.add_argument('--wd', type=float, required=False, default=0.01, help='weight_decay')
-    parser.add_argument('--epoch', type=int, required=False, default=200, help='Number of epoch')
+    parser.add_argument('--epoch', type=int, required=False, default=60, help='Number of epoch')
     parser.add_argument('--log_interval', type=int, required=False, default=40, help='Log interval')
     parser.add_argument('--cuda_name', type=str, required=False, default='cuda', help='cpu/gpu')
-    parser.add_argument('--dim', type=int, required=False, default=200,
+    parser.add_argument('--dim', type=int, required=False, default=300,
                         help='features dimensions of drugs and side effects')
     parser.add_argument('--save_model', action='store_true', default=True, help='save model and features')
 
@@ -487,7 +487,7 @@ if __name__ == '__main__':
         data.append((X[i, 1], drug_smile[X[i, 0]], X[i, 2]))
 
     fold = 1
-    kfold = StratifiedKFold(10, random_state=1, shuffle=True)
+    kfold = StratifiedKFold(5, random_state=1, shuffle=True)
 
     params = {'batch_size': 128,
               'shuffle': True,
