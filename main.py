@@ -69,7 +69,7 @@ def quantization_loss(y_hat, gamma=10.0, lam=0.05):
 # logits: (B,5) class logits (model classification head)
 # labels: (B,) ints in {1,2,3,4,5}
 # Hybrid đơn giản: MSE + quantization (CHỈ 2 THAM SỐ: y_reg, labels)
-def hybrid_loss(output, labels, gamma=1.5, lam=0.2, alpha=1.0):
+def hybrid_loss(output, labels, gamma=1.0, lam=100.0, alpha=1.0):
     output = output.to('cuda')
     labels = labels.to('cuda')
 
@@ -437,7 +437,7 @@ if __name__ == '__main__':
     parser.add_argument('--model', type=int, required=False, default=0)
     parser.add_argument('--lr', type=float, required=False, default=1e-4, help='Learning rate')
     parser.add_argument('--wd', type=float, required=False, default=0.01, help='weight_decay')
-    parser.add_argument('--epoch', type=int, required=False, default=60, help='Number of epoch')
+    parser.add_argument('--epoch', type=int, required=False, default=20, help='Number of epoch')
     parser.add_argument('--log_interval', type=int, required=False, default=40, help='Log interval')
     parser.add_argument('--cuda_name', type=str, required=False, default='cuda', help='cpu/gpu')
     parser.add_argument('--dim', type=int, required=False, default=300,
