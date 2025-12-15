@@ -313,6 +313,12 @@ def main(training_generator, testing_generator, modeling, lr, num_epoch, weight_
 
     best_rmse = 1e9
     best_epoch = -1
+    best_scc = -1e9
+    best_ov1 = 0
+    best_ov5 = 0
+    best_ov10 = 0
+    best_ov20 = 0
+    best_epoch_metrics = -1
     for epoch in range(num_epoch):
         # ==== TRAIN ====
         train_loss = trainfun(
@@ -343,10 +349,19 @@ def main(training_generator, testing_generator, modeling, lr, num_epoch, weight_
 
         test_rMSE = rmse(test_labels, test_preds)
         test_MAE = MAE(test_labels, test_preds)
+        scc, ov1, ov5, ov10, ov20 = compute_metrics(test_labels, test_preds)
 
         if test_rMSE < best_rmse:
             best_rmse = test_rMSE
             best_epoch = epoch + 1
+
+        if scc > best_scc:
+            best_scc = scc
+            best_ov1 = ov1
+            best_ov5 = ov5
+            best_ov10 = ov10
+            best_ov20 = ov20
+            best_epoch_metrics = epoch + 1
 
         # ---- EVALUATE ----
         auc_all, aupr_all, drugAUC, drugAUPR, precision, recall, accuracy = evaluate(
@@ -355,7 +370,8 @@ def main(training_generator, testing_generator, modeling, lr, num_epoch, weight_
             test_loader=testing_generator
         )
 
-        print('Intermediate Test:\trMSE: {:.5f}\tMAE: {:.5f}'.format(test_rMSE, test_MAE))
+        print('Intermediate Test:\trMSE: {:.5f}\tMAE: {:.5f}\tSCC: {:.5f}'.format(test_rMSE, test_MAE, scc))
+        print('Overlap@1%: {:.5f}\t5%: {:.5f}\t10%: {:.5f}\t20%: {:.5f}'.format(ov1, ov5, ov10, ov20))
         # print(
         #     '\tall AUC: {:.5f}\tall AUPR: {:.5f}\tdrug AUC: {:.5f}\t'
         #     'drug AUPR: {:.5f}\tPrecise: {:.5f}\tRecall: {:.5f}\tACC: {:.5f}'.format(
@@ -402,6 +418,8 @@ def main(training_generator, testing_generator, modeling, lr, num_epoch, weight_
     )
     print(f"\n>>>>> FOLD {k} FINISHED")
     print(f">>>>> BEST RMSE: {best_rmse:.5f} at epoch {best_epoch}\n")
+    print(f">>>>> BEST SCC: {best_scc:.5f} at epoch {best_epoch_metrics}")
+    print(f">>>>> BEST Overlaps: 1%={best_ov1:.5f}, 5%={best_ov5:.5f}, 10%={best_ov10:.5f}, 20%={best_ov20:.5f}")
 
 class Data_Encoder(data.Dataset):
     def __init__(self, list_IDs, labels, df_dti, k):

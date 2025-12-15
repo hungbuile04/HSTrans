@@ -53,6 +53,37 @@ def ci(y, f):
     ci = S / z
     return ci
 
+def compute_overlap(y_true, y_pred, percent=0.01):
+    """
+    percent: 0.01 = 1%, 0.05 = 5%, etc.
+    """
+    n = len(y_true)
+    k = max(1, int(n * percent))  # số phần tử top k%
+
+    true_idx = np.argsort(-y_true)[:k]      # top k% trị thật
+    pred_idx = np.argsort(-y_pred)[:k]      # top k% trị dự đoán
+
+    overlap = len(set(true_idx) & set(pred_idx)) / k
+    return overlap
+
+
+def compute_metrics(y_true, y_pred):
+    """
+    Tính SCC + 4 Overlap metrics.
+    """
+    y_true = np.array(y_true)
+    y_pred = np.array(y_pred)
+
+    # Spearman correlation
+    scc, _ = spearmanr(y_true, y_pred)
+
+    ov1  = compute_overlap(y_true, y_pred, 0.01)
+    ov5  = compute_overlap(y_true, y_pred, 0.05)
+    ov10 = compute_overlap(y_true, y_pred, 0.10)
+    ov20 = compute_overlap(y_true, y_pred, 0.20)
+
+    return scc, ov1, ov5, ov10, ov20
+
 
 def draw_loss(train_losses, test_losses, title, result_folder):
     plt.figure()
