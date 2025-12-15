@@ -75,7 +75,7 @@ def compute_metrics(y_true, y_pred):
     y_pred = np.array(y_pred)
 
     # Spearman correlation
-    scc, _ = spearmanr(y_true, y_pred)
+    scc, _ = stats.spearmanr(y_true, y_pred)
 
     ov1  = compute_overlap(y_true, y_pred, 0.01)
     ov5  = compute_overlap(y_true, y_pred, 0.05)
@@ -83,7 +83,6 @@ def compute_metrics(y_true, y_pred):
     ov20 = compute_overlap(y_true, y_pred, 0.20)
 
     return scc, ov1, ov5, ov10, ov20
-
 
 def draw_loss(train_losses, test_losses, title, result_folder):
     plt.figure()
