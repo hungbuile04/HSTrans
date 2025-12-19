@@ -1,3 +1,4 @@
+import math
 import torch.nn as nn
 import torch.nn.functional as F
 from Encoder import Encoder_MultipleLayers, Embeddings
@@ -186,14 +187,25 @@ class Trans(torch.nn.Module):
                 return_attn=False      # đặt True nếu bạn muốn attention weights
             )
 
+        D = x_d.shape[-1]
+        # ===== 1) Tính weight w_ij =====
+        scores = torch.matmul(x_d, x_e.transpose(-2, -1)) / math.sqrt(D)  # [B, Nd, Ns]
+        # mask padding SE
+        if mask_e is not None:
+            scores = scores.masked_fill(mask_e.unsqueeze(1) == 0, -1e9)
+        w = torch.softmax(scores, dim=-1)   # [B, Nd, Ns]
+
         # interaction
         d_aug = torch.unsqueeze(x_d, 2).repeat(1, 1, 50, 1)
         e_aug = torch.unsqueeze(x_e, 1).repeat(1, 50, 1, 1)
 
         i = d_aug * e_aug
+
+        # ===== 3) Weight interaction (KEY) =====
+        i = i * w.unsqueeze(-1)                         # [B, Nd, Ns, D]
+
         i_v = i.permute(0, 3, 1, 2)
         i_v = torch.sum(i_v, dim=1)
-        # i_v = i_v / (self.embDrug.embedding_dim ** 0.5) # Scale giống Attention
         i_v = torch.unsqueeze(i_v, 1)
         i_v = F.dropout(i_v, p=self.dropout)
 

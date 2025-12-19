@@ -178,7 +178,7 @@ def trainfun(model, device, train_loader, optimizer, epoch, log_interval, test_l
         out, _, _ = model(Drug, SE, DrugMask, SEMsak)  # mọi thứ đã trên GPU
         pred = out  # không cần .to(device) nữa
 
-        loss = hybrid_loss(pred.flatten(), Label)  # hoặc loss_fun
+        loss = loss_fun(pred.flatten(), Label)  # hoặc loss_fun
 
         loss.backward()
         optimizer.step()
@@ -455,7 +455,7 @@ if __name__ == '__main__':
     parser.add_argument('--model', type=int, required=False, default=0)
     parser.add_argument('--lr', type=float, required=False, default=1e-4, help='Learning rate')
     parser.add_argument('--wd', type=float, required=False, default=0.01, help='weight_decay')
-    parser.add_argument('--epoch', type=int, required=False, default=20, help='Number of epoch')
+    parser.add_argument('--epoch', type=int, required=False, default=40, help='Number of epoch')
     parser.add_argument('--log_interval', type=int, required=False, default=40, help='Log interval')
     parser.add_argument('--cuda_name', type=str, required=False, default='cuda', help='cpu/gpu')
     parser.add_argument('--dim', type=int, required=False, default=300,
