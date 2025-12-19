@@ -190,9 +190,6 @@ class Trans(torch.nn.Module):
         D = x_d.shape[-1]
         # ===== 1) Tính weight w_ij =====
         scores = torch.matmul(x_d, x_e.transpose(-2, -1)) / math.sqrt(D)  # [B, Nd, Ns]
-        # mask padding SE
-        if mask_e is not None:
-            scores = scores.masked_fill(mask_e.unsqueeze(1) == 0, -1e9)
         w = torch.softmax(scores, dim=-1)   # [B, Nd, Ns]
 
         # interaction
