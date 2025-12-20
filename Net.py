@@ -187,10 +187,10 @@ class Trans(torch.nn.Module):
                 return_attn=False      # đặt True nếu bạn muốn attention weights
             )
 
-        D = x_d.shape[-1]
+        # D = x_d.shape[-1]
         # ===== 1) Tính weight w_ij =====
-        scores = torch.matmul(x_d, x_e.transpose(-2, -1)) / math.sqrt(D)  # [B, Nd, Ns]
-        w = torch.softmax(scores, dim=-1)   # [B, Nd, Ns]
+        # scores = torch.matmul(x_d, x_e.transpose(-2, -1)) / math.sqrt(D)  # [B, Nd, Ns]
+        # w = torch.softmax(scores, dim=-1)   # [B, Nd, Ns]
 
         # interaction
         d_aug = torch.unsqueeze(x_d, 2).repeat(1, 1, 50, 1)
@@ -199,7 +199,7 @@ class Trans(torch.nn.Module):
         i = d_aug * e_aug
 
         # ===== 3) Weight interaction (KEY) =====
-        i = i * w.unsqueeze(-1)                         # [B, Nd, Ns, D]
+        # i = i * w.unsqueeze(-1)                         # [B, Nd, Ns, D]
 
         i_v = i.permute(0, 3, 1, 2)
         i_v = torch.sum(i_v, dim=1)
