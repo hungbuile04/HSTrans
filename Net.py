@@ -6,10 +6,6 @@ import torch
 import numpy as np
 import pandas as pd
 import codecs
-
-# DEVICE global
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
 try:
     from subword_nmt.apply_bpe import BPE
 except Exception:
@@ -20,6 +16,29 @@ except Exception:
             if line is None:
                 return ''
             return ' '.join(list(line.strip()))
+
+# DEVICE global
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+PAD_ID = 0
+UNK_ID = 1
+MAX_D  = 50
+
+sub_csv = pd.read_csv('data/subword_units_map_chembl_freq_1500.csv')
+
+# token string
+tokens = sub_csv['index'].astype(str).values
+# raw ids (0..len-1)
+raw_ids = sub_csv['level_0'].astype(int).values
+
+# shift: token_id = raw_id + 2
+words2idx_d = {t: int(i) + 2 for t, i in zip(tokens, raw_ids)}
+
+VOCAB_SIZE = int(raw_ids.max()) + 1 + 2   # (+2 for PAD/UNK)
+# nếu raw_ids là 0..2585 thì VOCAB_SIZE = 2586 + 2 = 2588
+
+bpe_codes_drug = codecs.open('data/drug_codes_chembl_freq_1500.txt')
+dbpe = BPE(bpe_codes_drug, merges=-1, separator='')
+
 
 class Trans(torch.nn.Module):
     def __init__(self):
@@ -156,72 +175,67 @@ class Trans(torch.nn.Module):
         return x_d_new, x_e_new
 
     def forward(self, Drug, SE, DrugMask, SEMsak):
-        batch = Drug.size(0)
-
         Drug = Drug.long().to(self.device)
-        DrugMask = DrugMask.long().to(self.device)
-        DrugMask_add = (1.0 - DrugMask.unsqueeze(1).unsqueeze(2)) * -10000.0
+        SE   = SE.long().to(self.device)
 
-        emb = self.embDrug(Drug)
-        x_d = self.encoderDrug(emb.float(), DrugMask_add.float(), False)  # [B,50,D]
+        DrugMask = DrugMask.long().to(self.device)  # (B,Nd) 1=valid,0=pad
+        SEMsak   = SEMsak.long().to(self.device)    # (B,Ns) 1=valid,0=pad
 
-        SE = SE.long().to(self.device)
-        SEMsak = SEMsak.long().to(self.device)
-        SEMsak_add = (1.0 - SEMsak.unsqueeze(1).unsqueeze(2)) * -10000.0
+        DrugMask_add = (1.0 - DrugMask.unsqueeze(1).unsqueeze(2)) * -10000.0  # (B,1,1,Nd)
+        SEMsak_add   = (1.0 - SEMsak.unsqueeze(1).unsqueeze(2)) * -10000.0    # (B,1,1,Ns)
 
-        embE = self.embSide(SE)
-        x_e = self.encoderSide(embE.float(), SEMsak_add.float(), False)  # [B,50,D]
+        x_d = self.encoderDrug(self.embDrug(Drug).float(), DrugMask_add.float(), False)  # (B,Nd,D)
+        x_e = self.encoderSide(self.embSide(SE).float(),  SEMsak_add.float(),  False)   # (B,Ns,D)
 
         if self.CrossAttention:
-            mask_d = (DrugMask_add.squeeze(1).squeeze(1) == 0).long()
-            mask_e = (SEMsak_add.squeeze(1).squeeze(1) == 0).long()
-            x_d, x_e = self.crossAttention_simple(x_d.float(), x_e.float(), mask_d=mask_d, mask_e=mask_e)
+            # mask đúng: True = pad
+            mask_d_pad = (DrugMask == 0)
+            mask_e_pad = (SEMsak == 0)
+            x_d, x_e = self.crossAttention_simple(
+                x_d.float(), x_e.float(),
+                mask_d=mask_d_pad, mask_e=mask_e_pad
+            )
 
-        D = x_d.shape[-1]
+        D  = x_d.size(-1)
+        Nd = x_d.size(1)
+        Ns = x_e.size(1)
 
-        scores = torch.matmul(x_d, x_e.transpose(-2, -1)) / math.sqrt(D)  # [B,Nd,Ns]
-        # SEMsak_add: [B,1,1,Ns] với 0 (real), -10000 (pad)
-        scores = scores + SEMsak_add.squeeze(1)  # -> [B,1,Ns]
-        # cần broadcast thành [B,Nd,Ns]
-        scores = scores + SEMsak_add.squeeze(1).expand(-1, scores.size(1), -1)
-        w = torch.softmax(scores, dim=-1)
+        scores = torch.matmul(x_d, x_e.transpose(-2, -1)) / math.sqrt(D)  # (B,Nd,Ns)
 
-        d_aug = x_d.unsqueeze(2).repeat(1, 1, 50, 1)
-        e_aug = x_e.unsqueeze(1).repeat(1, 50, 1, 1)
-        i = d_aug * e_aug
-        i = i * w.unsqueeze(-1)  # [B,Nd,Ns,D]
+        # mask pad của SE (keys) đúng 1 lần
+        se_add = SEMsak_add.squeeze(1).squeeze(1)        # (B,Ns)
+        scores = scores + se_add.unsqueeze(1)            # (B,1,Ns) broadcast -> (B,Nd,Ns)
+
+        w = torch.softmax(scores, dim=-1)                # (B,Nd,Ns)
+
+        d_aug = x_d.unsqueeze(2).expand(-1, -1, Ns, -1)  # (B,Nd,Ns,D)
+        e_aug = x_e.unsqueeze(1).expand(-1, Nd, -1, -1)  # (B,Nd,Ns,D)
+
+        i = (d_aug * e_aug) * w.unsqueeze(-1)            # (B,Nd,Ns,D)
         i = F.dropout(i, p=self.dropout, training=self.training)
 
-        feat = self.pooled_interaction(i, DrugMask_add, SEMsak_add)  # [B,2D]
-        score = self.decoder(feat)  # [B,1]
+        feat = self.pooled_interaction(i, DrugMask_add, SEMsak_add)  # (B,2D)
+        score = self.decoder(feat)                                   # (B,1)
 
         return score, Drug, SE
 
 
 
-def drug2emb_encoder(smile):
-    vocab_path = 'data/drug_codes_chembl_freq_1500.txt'
-    sub_csv = pd.read_csv('data/subword_units_map_chembl_freq_1500.csv')
+def drug2emb_encoder(smile, max_d=MAX_D):
+    toks = dbpe.process_line(smile).split()
 
-    # 初始化一个BPE编码器，该编码器可以用于将文本进行分词或编码
-    bpe_codes_drug = codecs.open(vocab_path)
-    dbpe = BPE(bpe_codes_drug, merges=-1, separator='')
-    idx2word_d = sub_csv['index'].values  # 将所有的子结构列表给提取出来
-    words2idx_d = dict(zip(idx2word_d, range(0, len(idx2word_d))))  # 构造字典：让子结构与index一一对应
-
-    max_d = 50
-    t1 = dbpe.process_line(smile).split()  # split
-    try:
-        i1 = np.asarray([words2idx_d[i] for i in t1])  # 将该smile的子结构找到对应的index，形成一个index的ndarray
-    except:
-        i1 = np.array([0])
-
-    l = len(i1)
-    if l < max_d:
-        i = np.pad(i1, (0, max_d - l), 'constant', constant_values=0)
-        input_mask = ([1] * l) + ([0] * (max_d - l))
+    if len(toks) == 0:
+        ids = np.array([UNK_ID], dtype=np.int64)
     else:
-        i = i1[:max_d]  # 进行填充
-        input_mask = [1] * max_d  # 构造mask（盖住填充部分）
+        ids = np.array([words2idx_d.get(t, UNK_ID) for t in toks], dtype=np.int64)
 
-    return i, np.asarray(input_mask)
+    L = min(len(ids), max_d)
+
+    out = np.full((max_d,), PAD_ID, dtype=np.int64)
+    out[:L] = ids[:L]
+
+    mask = np.zeros((max_d,), dtype=np.int64)
+    mask[:L] = 1
+    return out, mask
+
+

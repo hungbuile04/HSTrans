@@ -7,6 +7,7 @@ import pandas as pd
 
 import torch
 import torch.utils.data as data
+import torch.nn.functional as F
 
 from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit
 from sklearn.metrics import roc_auc_score, average_precision_score, precision_score, recall_score, accuracy_score
@@ -25,6 +26,12 @@ with open('data/drug_side.pkl', 'rb') as gii:
     drug_side = pickle.load(gii)
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# =========================================================
+# Mapping class (0..5) -> continuous score (log-midpoint)
+# =========================================================
+MID_LOGP6 = np.array([-5.5, -4.5, -3.5, -2.5, -1.5, -0.5], dtype=np.float32)
+MID_LOGP6_T = None  # lazy tensor on correct device
 
 
 # =========================================================
@@ -59,11 +66,70 @@ def Extract_positive_negative_samples(DAL, addition_negative_number=''):
     final_positive_sample = np.concatenate((final_positive_sample, final_negtive_sample), axis=0)
     return addition_negative_sample, final_positive_sample, final_negtive_sample
 
-def loss_fun(output, label):
-    # sum-squared-error
-    return torch.sum((output - label) ** 2)
+
+# =========================================================
+# Class weights (0..5) from TRAIN loader
+# =========================================================
+def compute_class_weights(train_loader, device, num_classes=6, clamp_max=10.0):
+    counts = torch.zeros(num_classes, dtype=torch.float32)
+    for batch in train_loader:
+        y = torch.as_tensor(batch[4]).view(-1).long()  # labels 0..5
+        for c in range(num_classes):
+            counts[c] += (y == c).sum().item()
+    w = 1.0 / counts.clamp_min(1.0)
+    w = w / w.mean().clamp_min(1e-8)
+    w = torch.clamp(w, max=clamp_max).to(device)
+    return w, counts.to(device)
 
 
+def pairwise_rank_loss(pred, y_cont, margin=0.0, max_pairs=4096):
+    B = pred.size(0)
+    if B < 2:
+        return pred.new_tensor(0.0)
+
+    dy = y_cont.view(B, 1) - y_cont.view(1, B)
+    mask = dy > 0
+    if mask.sum() == 0:
+        return pred.new_tensor(0.0)
+
+    dp = (pred.view(B, 1) - pred.view(1, B))[mask]
+
+    if dp.numel() > max_pairs:
+        idx = torch.randperm(dp.numel(), device=pred.device)[:max_pairs]
+        dp = dp[idx]
+
+    return F.softplus(-(dp - margin)).mean()
+
+# =========================================================
+# Loss: weighted regression + existence BCE (zero-inflated)
+# =========================================================
+def loss_regression_zero_inflated(pred, y_cls, class_weight,
+                  lambda_exist=0.2, exist_margin=0.5,
+                  lambda_rank=0.2, rank_margin=0.0):
+    global MID_LOGP6_T
+    device = pred.device
+    if MID_LOGP6_T is None or MID_LOGP6_T.device != device:
+        MID_LOGP6_T = torch.tensor(MID_LOGP6, device=device, dtype=torch.float32)
+
+    y_cls = y_cls.long().clamp(0, 5)
+    y_cont = MID_LOGP6_T[y_cls]
+
+    w = class_weight[y_cls].detach()
+    reg = F.smooth_l1_loss(pred, y_cont, reduction='none')
+    L_reg = (w * reg).mean()
+
+    y_exist = (y_cls > 0).float()
+    thr0 = MID_LOGP6_T[0] + exist_margin
+    L_exist = F.binary_cross_entropy_with_logits(pred - thr0, y_exist)
+
+    L_rank = pairwise_rank_loss(pred, y_cont, margin=rank_margin)
+
+    L = L_reg + lambda_exist * L_exist + lambda_rank * L_rank
+    return L, {"reg": L_reg.detach(), "exist": L_exist.detach(), "rank": L_rank.detach()}
+
+# =========================================================
+# Build SE_sub_index from TRAIN only (no leakage)
+# =========================================================
 def identify_sub_fold(data_list, fold_id: int,
                       n_se: int = 994,
                       vocab_size: int = 2686,
@@ -81,7 +147,7 @@ def identify_sub_fold(data_list, fold_id: int,
     # 1) Encode SMILES -> sub tokens
     sub_dict = {}
     for i in range(len(drug_smile)):
-        drug_sub, mask = drug2emb_encoder(drug_smile[i])
+        drug_sub, _ = drug2emb_encoder(drug_smile[i])
         sub_dict[i] = drug_sub.tolist()
 
     # 2) Aggregate SE_sub
@@ -103,12 +169,12 @@ def identify_sub_fold(data_list, fold_id: int,
     Sub_p = Sub_sum / n
     SE_sub_p = SE_sub / n
 
-    # Vectorized freq
     denom = np.sqrt(
         (SE_p[:, None] * Sub_p[None, :] / n) *
         (1 - SE_p)[:, None] *
         (1 - Sub_p)[None, :]
     ) + 1e-12
+
     freq = (SE_sub_p - (SE_p[:, None] * Sub_p[None, :])) / denom
     freq = freq + 1e-5
 
@@ -116,7 +182,6 @@ def identify_sub_fold(data_list, fold_id: int,
     thr = np.percentile(non_nan_values, percentile)
     print(f"[Fold {fold_id}] percentile@{percentile}% = {thr}")
 
-    # 3) Select topk per SE
     SE_sub_index = np.zeros((n_se, topk), dtype=np.int32)
     for sid in range(n_se):
         row = freq[sid]
@@ -141,6 +206,17 @@ def identify_sub_fold(data_list, fold_id: int,
     print(f"[Fold {fold_id}] Saved: SE_sub_index_50_{fold_id}.npy / SE_sub_mask_50_{fold_id}.npy")
 
 
+def rank_weight_schedule(epoch, warmup=5, max_w=0.2):
+    if epoch <= warmup:
+        return max_w * (epoch / warmup)
+    return max_w
+
+def composite_score(m, alpha=0.5, beta=0.2):
+    return float(m["rmse"] - alpha*m["scc"] - beta*m["ov10"])
+
+# =========================================================
+# Dataset
+# =========================================================
 class Data_Encoder(data.Dataset):
     def __init__(self, list_IDs, labels, df_dti, fold_id: int):
         self.labels = labels
@@ -158,108 +234,122 @@ class Data_Encoder(data.Dataset):
         index = self.list_IDs[idx]
         d = self.df.iloc[index]['Drug_smile']
         s = int(self.df.iloc[index]['SE_id'])
-        y = float(self.labels[index])
+        y = int(self.labels[index])  # IMPORTANT: keep as int class 0..5
 
         d_v, input_mask_d = drug2emb_encoder(d)     # (50,), (50,)
         s_v = self.SE_index[s, :]                   # (50,)
         input_mask_s = self.SE_mask[s, :]           # (50,)
 
-        # return y as float tensor later in collate
         return d_v, s_v, input_mask_d, input_mask_s, y
 
 
-# Train
-def trainfun(model, device, train_loader, optimizer, epoch, log_interval):
-    # print(f"Training on {len(train_loader.dataset)} samples...")
+# =========================================================
+# Train one epoch (regression output B,1)
+# =========================================================
+def trainfun(model, device, train_loader, optimizer, epoch, log_interval,
+             class_weight, lambda_exist=0.2, exist_margin=0.5, grad_clip=1.0):
     model.train()
-    avg_loss = []
+    meter = {"loss": 0.0, "reg": 0.0, "exist": 0.0}
+    n_batches = 0
 
-    # lấy vocab từ embedding
-    vocab = model.embDrug.word_embeddings.num_embeddings
+    vocab_d = model.embDrug.word_embeddings.num_embeddings
+    vocab_e = model.embSide.word_embeddings.num_embeddings
 
     for batch_idx, (Drug, SE, DrugMask, SEMsak, Label) in enumerate(train_loader):
-        # move to device
         Drug     = Drug.to(device, non_blocking=True).long()
         SE       = SE.to(device, non_blocking=True).long()
         DrugMask = DrugMask.to(device, non_blocking=True)
         SEMsak   = SEMsak.to(device, non_blocking=True)
-        Label    = torch.tensor([int(x) for x in Label], device=device).float()
 
-        # ====== CHECK out-of-range (OOR) ======
+        y_cls = torch.as_tensor(Label, device=device).view(-1).long()  # 0..5
+
+        # OOR check
         dmin, dmax = int(Drug.min().item()), int(Drug.max().item())
-        emin, emax = int(SE.min().item()), int(SE.max().item())
-
-        if dmax >= vocab or dmin < 0:
-            raise RuntimeError(f"[Drug OOR] min={dmin} max={dmax} vocab={vocab}")
-        if emax >= vocab or emin < 0:
-            raise RuntimeError(f"[SE OOR] min={emin} max={emax} vocab={vocab}")
+        emin, emax = int(SE.min().item()),   int(SE.max().item())
+        if dmax >= vocab_d or dmin < 0:
+            raise RuntimeError(f"[Drug OOR] min={dmin} max={dmax} vocab={vocab_d}")
+        if emax >= vocab_e or emin < 0:
+            raise RuntimeError(f"[SE OOR] min={emin} max={emax} vocab={vocab_e}")
 
         optimizer.zero_grad(set_to_none=True)
-        out, _, _ = model(Drug, SE, DrugMask, SEMsak)
-        pred = out.view(-1)
 
-        loss = loss_fun(pred, Label)
+        out, _, _ = model(Drug, SE, DrugMask, SEMsak)  # (B,1)
+        pred = out.view(-1).float()
+        lambda_rank_epoch = rank_weight_schedule(epoch, warmup=5, max_w=0.2)
+        loss, parts = loss_regression_zero_inflated(
+            pred=pred,
+            y_cls=y_cls,
+            class_weight=class_weight,
+            lambda_exist=lambda_exist,
+            exist_margin=exist_margin,
+            lambda_rank=0.2,
+            rank_margin=0.0
+        )
+
+        if not torch.isfinite(loss):
+            raise RuntimeError(f"Non-finite loss detected. loss={loss.item()}")
+
         loss.backward()
+        if grad_clip and grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         optimizer.step()
 
-        avg_loss.append(loss.item())
+        meter["loss"]  += float(loss.detach().cpu())
+        meter["reg"]   += float(parts["reg"].cpu())
+        meter["exist"] += float(parts["exist"].cpu())
+        n_batches += 1
 
-        # if batch_idx % log_interval == 0:
-        #     print(
-        #         f"Train epoch: {epoch} "
-        #         f"[{(batch_idx+1)*len(Label)}/{len(train_loader.dataset)} "
-        #         f"({100.*(batch_idx+1)/len(train_loader):.0f}%)]\t"
-        #         f"Loss: {loss.item():.6f}"
-        #     )
+        # if (batch_idx + 1) % log_interval == 0:
+        #     print(f"  Batch {batch_idx+1}/{len(train_loader)} | "
+        #           f"loss={meter['loss']/n_batches:.4f} "
+        #           f"reg={meter['reg']/n_batches:.4f} "
+        #           f"exist={meter['exist']/n_batches:.4f}")
 
-    return sum(avg_loss) / max(1, len(avg_loss))
+    for k in meter:
+        meter[k] /= max(1, n_batches)
+    return meter
 
 
-# Regression evaluation (RMSE/MAE/SCC/Overlap)
 def evaluate_regression(model, device, loader, only_nonzero=True):
     model.eval()
-    all_preds = []
-    all_labels = []
+    all_preds, all_y, all_ycls = [], [], []
+
+    mid = torch.tensor(MID_LOGP6, device=device, dtype=torch.float32)
 
     with torch.no_grad():
         for Drug, SE, DrugMask, SEMsak, Label in loader:
-            Drug     = Drug.to(device, non_blocking=True)
-            SE       = SE.to(device, non_blocking=True)
-            DrugMask = DrugMask.to(device, non_blocking=True)
-            SEMsak   = SEMsak.to(device, non_blocking=True)
+            Drug = Drug.to(device).long()
+            SE = SE.to(device).long()
+            DrugMask = DrugMask.to(device)
+            SEMsak = SEMsak.to(device)
 
-            Label = torch.tensor(Label, device=device, dtype=torch.float32).view(-1)
+            y_cls = torch.as_tensor(Label, device=device).view(-1).long()   # 0..5
+            y = mid[y_cls]                                                 # log-midpoint
 
             out, _, _ = model(Drug, SE, DrugMask, SEMsak)
-            pred = out.view(-1)
+            pred = out.view(-1).float()                                     # log-scale
 
-            all_preds.append(pred.detach().cpu())
-            all_labels.append(Label.detach().cpu())
+            all_preds.append(pred.cpu())
+            all_y.append(y.cpu())
+            all_ycls.append(y_cls.cpu())
 
     preds = torch.cat(all_preds).numpy()
-    labels = torch.cat(all_labels).numpy()
+    y = torch.cat(all_y).numpy()
+    y_cls = torch.cat(all_ycls).numpy()
 
     if only_nonzero:
-        mask = (labels != 0)
-        labels_use = labels[mask]
-        preds_use = preds[mask]
+        mask = (y_cls != 0)
+        y_use, pred_use = y[mask], preds[mask]
     else:
-        labels_use = labels
-        preds_use = preds
+        y_use, pred_use = y, preds
 
     m = {}
-    m["rmse"] = rmse(labels_use, preds_use)
-    m["mae"]  = MAE(labels_use, preds_use)
-    scc, ov1, ov5, ov10, ov20 = compute_metrics(labels_use, preds_use)
-    m["scc"] = scc
-    m["ov1"] = ov1
-    m["ov5"] = ov5
-    m["ov10"] = ov10
-    m["ov20"] = ov20
-    m["labels"] = labels_use
-    m["preds"] = preds_use
+    m["rmse"] = rmse(y_use, pred_use)
+    m["mae"]  = MAE(y_use, pred_use)
+    scc, ov1, ov5, ov10, ov20 = compute_metrics(y_use, pred_use)
+    m["scc"], m["ov1"], m["ov5"], m["ov10"], m["ov20"] = scc, ov1, ov5, ov10, ov20
+    m["labels"], m["preds"] = y_use, pred_use
     return m
-
 
 #   - y_true = (label!=0)
 #   - score  = pred (continuous)  -> AUC/AUPR should use continuous score
@@ -302,8 +392,8 @@ def evaluate_binary_from_regression(model, device, loader, threshold=0.5):
 def main_fold(train_loader, val_loader, test_loader,
               modeling, lr, num_epoch, weight_decay, log_interval,
               cuda_name, save_model, fold_id,
-              early_stop_patience=100,
-              select_metric="rmse"):
+              select_metric="rmse",
+              lambda_exist=0.2, exist_margin=0.5, grad_clip=1.0):
 
     print('\n=======================================================================================')
     print('model: ', modeling.__name__)
@@ -332,7 +422,12 @@ def main_fold(train_loader, val_loader, test_loader,
 
     print(f'Total parameters: {total_params}')
 
+    class_weight, counts = compute_class_weights(train_loader, device=device)
+    print(f"[Fold {fold_id}] class counts: {counts.detach().cpu().tolist()}")
+    print(f"[Fold {fold_id}] class weight: {class_weight.detach().cpu().tolist()}")
+
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode="min" if select_metric == "rmse" else "max",
@@ -350,18 +445,25 @@ def main_fold(train_loader, val_loader, test_loader,
     best_score = float("inf") if select_metric == "rmse" else -float("inf")
 
     for epoch in range(num_epoch):
-        train_loss = trainfun(model, device, train_loader, optimizer, epoch + 1, log_interval)
+        train_loss = trainfun(
+            model=model, device=device, train_loader=train_loader,
+            optimizer=optimizer, epoch=epoch + 1, log_interval=log_interval,
+            class_weight=class_weight,
+            lambda_exist=lambda_exist,
+            exist_margin=exist_margin,
+            grad_clip=grad_clip
+        )
 
         val_m = evaluate_regression(model, device, val_loader, only_nonzero=True)
 
         print(f"\n===== Epoch {epoch + 1} summary =====")
-        print(f"Train Loss: {train_loss:.5f}")
+        print(f"Train Loss: {train_loss['loss']:.5f} (reg={train_loss['reg']:.5f}, exist={train_loss['exist']:.5f})")
         print('Validation:\tRMSE: {:.5f}\tMAE: {:.5f}\tSCC: {:.5f}'.format(val_m["rmse"], val_m["mae"], val_m["scc"]))
         print('Overlap@1%: {:.5f}\t5%: {:.5f}\t10%: {:.5f}\t20%: {:.5f}'.format(
             val_m["ov1"], val_m["ov5"], val_m["ov10"], val_m["ov20"]
         ))
 
-        cur = val_m["rmse"] if select_metric == "rmse" else val_m["scc"]
+        cur = composite_score(val_m)
         scheduler.step(cur)
 
         improved = (cur < best_score) if select_metric == "rmse" else (cur > best_score)
@@ -375,9 +477,7 @@ def main_fold(train_loader, val_loader, test_loader,
                 torch.save(best_state, f"checkpoints/fold{fold_id}_best_val_{select_metric}.pt")
         else:
             bad_epochs += 1
-            if bad_epochs >= early_stop_patience:
-                print(f"Early stopping. Best val {select_metric} at epoch {best_epoch}: {best_score:.5f}")
-                break
+
 
     # Load best and final test once
     if best_state is not None:
@@ -415,7 +515,7 @@ if __name__ == '__main__':
 
     # val split + early stop
     parser.add_argument('--val_ratio', type=float, default=0.1)
-    parser.add_argument('--patience', type=int, default=10)
+    # parser.add_argument('--patience', type=int, default=10)
     parser.add_argument('--select_metric', type=str, default='rmse', choices=['rmse', 'scc'])
 
     args = parser.parse_args()
@@ -520,6 +620,5 @@ if __name__ == '__main__':
             cuda_name=cuda_name,
             save_model=save_model,
             fold_id=fold_id,
-            early_stop_patience=args.patience,
             select_metric=args.select_metric
         )
