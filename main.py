@@ -7,9 +7,8 @@ import pandas as pd
 
 import torch
 import torch.utils.data as data
-import torch.nn.functional as F
 
-from sklearn.model_selection import StratifiedKFold, StratifiedShuffleSplit
+from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import roc_auc_score, average_precision_score, precision_score, recall_score, accuracy_score
 
 from Net import *                 # Trans, drug2emb_encoder, ...
@@ -27,12 +26,6 @@ with open('data/drug_side.pkl', 'rb') as gii:
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# =========================================================
-# Mapping class (0..5) -> continuous score (log-midpoint)
-# =========================================================
-MID_LOGP6 = np.array([-5.5, -4.5, -3.5, -2.5, -1.5, -0.5], dtype=np.float32)
-MID_LOGP6_T = None  # lazy tensor on correct device
-
 
 # =========================================================
 # Sampling (author style): positive = DAL!=0, negative = DAL==0
@@ -47,11 +40,11 @@ def Extract_positive_negative_samples(DAL, addition_negative_number=''):
             interaction_target[k, 2] = DAL[i, j]
             k += 1
 
-    data_shuffle = interaction_target[interaction_target[:, 2].argsort()]  # sort by label
+    data_shuffle = interaction_target[interaction_target[:, 2].argsort()]
     number_positive = len(np.nonzero(data_shuffle[:, 2])[0])
 
-    final_positive_sample = data_shuffle[interaction_target.shape[0] - number_positive::]  # DAL!=0
-    negative_sample = data_shuffle[0:interaction_target.shape[0] - number_positive]        # DAL==0
+    final_positive_sample = data_shuffle[interaction_target.shape[0] - number_positive::]
+    negative_sample = data_shuffle[0:interaction_target.shape[0] - number_positive]
 
     a = list(np.arange(interaction_target.shape[0] - number_positive))
     if addition_negative_number == 'all':
@@ -62,70 +55,17 @@ def Extract_positive_negative_samples(DAL, addition_negative_number=''):
     final_negtive_sample = negative_sample[b[0:number_positive], :]
     addition_negative_sample = negative_sample[b[number_positive::], :]
 
-    # balanced set = positive + same-size negative
     final_positive_sample = np.concatenate((final_positive_sample, final_negtive_sample), axis=0)
     return addition_negative_sample, final_positive_sample, final_negtive_sample
 
 
 # =========================================================
-# Class weights (0..5) from TRAIN loader
+# SIMPLE MSE LOSS (như paper gốc)
 # =========================================================
-def compute_class_weights(train_loader, device, num_classes=6, clamp_max=10.0):
-    counts = torch.zeros(num_classes, dtype=torch.float32)
-    for batch in train_loader:
-        y = torch.as_tensor(batch[4]).view(-1).long()  # labels 0..5
-        for c in range(num_classes):
-            counts[c] += (y == c).sum().item()
-    w = 1.0 / counts.clamp_min(1.0)
-    w = w / w.mean().clamp_min(1e-8)
-    w = torch.clamp(w, max=clamp_max).to(device)
-    return w, counts.to(device)
+def loss_fun(output, label):
+    """Simple MSE loss - exactly as in original HSTrans paper"""
+    return torch.sum((output - label) ** 2)
 
-
-def pairwise_rank_loss(pred, y_cont, margin=0.0, max_pairs=4096):
-    B = pred.size(0)
-    if B < 2:
-        return pred.new_tensor(0.0)
-
-    dy = y_cont.view(B, 1) - y_cont.view(1, B)
-    mask = dy > 0
-    if mask.sum() == 0:
-        return pred.new_tensor(0.0)
-
-    dp = (pred.view(B, 1) - pred.view(1, B))[mask]
-
-    if dp.numel() > max_pairs:
-        idx = torch.randperm(dp.numel(), device=pred.device)[:max_pairs]
-        dp = dp[idx]
-
-    return F.softplus(-(dp - margin)).mean()
-
-# =========================================================
-# Loss: weighted regression + existence BCE (zero-inflated)
-# =========================================================
-def loss_regression_zero_inflated(pred, y_cls, class_weight,
-                  lambda_exist=0.2, exist_margin=0.5,
-                  lambda_rank=0.2, rank_margin=0.0):
-    global MID_LOGP6_T
-    device = pred.device
-    if MID_LOGP6_T is None or MID_LOGP6_T.device != device:
-        MID_LOGP6_T = torch.tensor(MID_LOGP6, device=device, dtype=torch.float32)
-
-    y_cls = y_cls.long().clamp(0, 5)
-    y_cont = MID_LOGP6_T[y_cls]
-
-    w = class_weight[y_cls].detach()
-    reg = F.smooth_l1_loss(pred, y_cont, reduction='none')
-    L_reg = (w * reg).mean()
-
-    y_exist = (y_cls > 0).float()
-    thr0 = MID_LOGP6_T[0] + exist_margin
-    L_exist = F.binary_cross_entropy_with_logits(pred - thr0, y_exist)
-
-    L_rank = pairwise_rank_loss(pred, y_cont, margin=rank_margin)
-
-    L = L_reg + lambda_exist * L_exist + lambda_rank * L_rank
-    return L, {"reg": L_reg.detach(), "exist": L_exist.detach(), "rank": L_rank.detach()}
 
 # =========================================================
 # Build SE_sub_index from TRAIN only (no leakage)
@@ -140,8 +80,8 @@ def identify_sub_fold(data_list, fold_id: int,
     print(f"[Fold {fold_id}] Building SE_sub_index from TRAIN only (no leakage)")
     os.makedirs(out_dir, exist_ok=True)
 
-    drug_smile = [item[1] for item in data_list]      # SMILES
-    side_id    = [int(item[0]) for item in data_list] # SE_id
+    drug_smile = [item[1] for item in data_list]
+    side_id    = [int(item[0]) for item in data_list]
     labels     = [float(item[2]) for item in data_list]
 
     # 1) Encode SMILES -> sub tokens
@@ -162,8 +102,8 @@ def identify_sub_fold(data_list, fold_id: int,
                 SE_sub[sid, tok] += y
 
     n = float(np.sum(SE_sub)) + 1e-12
-    SE_sum  = np.sum(SE_sub, axis=1)   # (n_se,)
-    Sub_sum = np.sum(SE_sub, axis=0)   # (vocab_size,)
+    SE_sum  = np.sum(SE_sub, axis=1)
+    Sub_sum = np.sum(SE_sub, axis=0)
 
     SE_p  = SE_sum / n
     Sub_p = Sub_sum / n
@@ -203,16 +143,8 @@ def identify_sub_fold(data_list, fold_id: int,
     np.save(os.path.join(out_dir, f"SE_sub_index_50_{fold_id}.npy"), SE_sub_index)
     np.save(os.path.join(out_dir, f"SE_sub_mask_50_{fold_id}.npy"),  SE_sub_mask)
 
-    print(f"[Fold {fold_id}] Saved: SE_sub_index_50_{fold_id}.npy / SE_sub_mask_50_{fold_id}.npy")
+    print(f"[Fold {fold_id}] Saved SE features")
 
-
-def rank_weight_schedule(epoch, warmup=5, max_w=0.2):
-    if epoch <= warmup:
-        return max_w * (epoch / warmup)
-    return max_w
-
-def composite_score(m, alpha=0.5, beta=0.2):
-    return float(m["rmse"] - alpha*m["scc"] - beta*m["ov10"])
 
 # =========================================================
 # Dataset
@@ -234,166 +166,153 @@ class Data_Encoder(data.Dataset):
         index = self.list_IDs[idx]
         d = self.df.iloc[index]['Drug_smile']
         s = int(self.df.iloc[index]['SE_id'])
-        y = int(self.labels[index])  # IMPORTANT: keep as int class 0..5
+        y = self.labels[index]  # Keep as original float value
 
-        d_v, input_mask_d = drug2emb_encoder(d)     # (50,), (50,)
-        s_v = self.SE_index[s, :]                   # (50,)
-        input_mask_s = self.SE_mask[s, :]           # (50,)
+        d_v, input_mask_d = drug2emb_encoder(d)
+        s_v = self.SE_index[s, :]
+        input_mask_s = self.SE_mask[s, :]
 
         return d_v, s_v, input_mask_d, input_mask_s, y
 
 
 # =========================================================
-# Train one epoch (regression output B,1)
+# Train one epoch (SIMPLE - như paper gốc)
 # =========================================================
-def trainfun(model, device, train_loader, optimizer, epoch, log_interval,
-             class_weight, lambda_exist=0.2, exist_margin=0.5, grad_clip=1.0):
+def trainfun(model, device, train_loader, optimizer, epoch, log_interval):
+    print('Training on {} samples...'.format(len(train_loader.dataset)))
     model.train()
-    meter = {"loss": 0.0, "reg": 0.0, "exist": 0.0}
-    n_batches = 0
-
-    vocab_d = model.embDrug.word_embeddings.num_embeddings
-    vocab_e = model.embSide.word_embeddings.num_embeddings
+    avg_loss = []
 
     for batch_idx, (Drug, SE, DrugMask, SEMsak, Label) in enumerate(train_loader):
-        Drug     = Drug.to(device, non_blocking=True).long()
-        SE       = SE.to(device, non_blocking=True).long()
+        Drug     = Drug.to(device, non_blocking=True)
+        SE       = SE.to(device, non_blocking=True)
         DrugMask = DrugMask.to(device, non_blocking=True)
         SEMsak   = SEMsak.to(device, non_blocking=True)
+        Label    = torch.FloatTensor([float(item) for item in Label]).to(device, non_blocking=True)
 
-        y_cls = torch.as_tensor(Label, device=device).view(-1).long()  # 0..5
+        optimizer.zero_grad()
+        out, _, _ = model(Drug, SE, DrugMask, SEMsak)
+        pred = out.flatten()
 
-        # OOR check
-        dmin, dmax = int(Drug.min().item()), int(Drug.max().item())
-        emin, emax = int(SE.min().item()),   int(SE.max().item())
-        if dmax >= vocab_d or dmin < 0:
-            raise RuntimeError(f"[Drug OOR] min={dmin} max={dmax} vocab={vocab_d}")
-        if emax >= vocab_e or emin < 0:
-            raise RuntimeError(f"[SE OOR] min={emin} max={emax} vocab={vocab_e}")
-
-        optimizer.zero_grad(set_to_none=True)
-
-        out, _, _ = model(Drug, SE, DrugMask, SEMsak)  # (B,1)
-        pred = out.view(-1).float()
-        lambda_rank_epoch = rank_weight_schedule(epoch, warmup=5, max_w=0.2)
-        loss, parts = loss_regression_zero_inflated(
-            pred=pred,
-            y_cls=y_cls,
-            class_weight=class_weight,
-            lambda_exist=lambda_exist,
-            exist_margin=exist_margin,
-            lambda_rank=0.2,
-            rank_margin=0.0
-        )
-
-        if not torch.isfinite(loss):
-            raise RuntimeError(f"Non-finite loss detected. loss={loss.item()}")
+        # SIMPLE MSE LOSS - exactly as original paper
+        loss = loss_fun(pred, Label)
 
         loss.backward()
-        if grad_clip and grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         optimizer.step()
+        avg_loss.append(loss.item())
 
-        meter["loss"]  += float(loss.detach().cpu())
-        meter["reg"]   += float(parts["reg"].cpu())
-        meter["exist"] += float(parts["exist"].cpu())
-        n_batches += 1
+        if batch_idx % log_interval == 0:
+            print('Train epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
+                epoch,
+                (batch_idx + 1) * len(Label),
+                len(train_loader.dataset),
+                100. * (batch_idx + 1) / len(train_loader),
+                loss.item()
+            ))
 
-        # if (batch_idx + 1) % log_interval == 0:
-        #     print(f"  Batch {batch_idx+1}/{len(train_loader)} | "
-        #           f"loss={meter['loss']/n_batches:.4f} "
-        #           f"reg={meter['reg']/n_batches:.4f} "
-        #           f"exist={meter['exist']/n_batches:.4f}")
-
-    for k in meter:
-        meter[k] /= max(1, n_batches)
-    return meter
+    return sum(avg_loss) / len(avg_loss)
 
 
-def evaluate_regression(model, device, loader, only_nonzero=True):
+# =========================================================
+# Predict (như paper gốc)
+# =========================================================
+def predict(model, device, test_loader):
+    total_preds = torch.Tensor()
+    total_labels = torch.Tensor()
+
     model.eval()
-    all_preds, all_y, all_ycls = [], [], []
-
-    mid = torch.tensor(MID_LOGP6, device=device, dtype=torch.float32)
+    torch.cuda.manual_seed(42)
 
     with torch.no_grad():
-        for Drug, SE, DrugMask, SEMsak, Label in loader:
-            Drug = Drug.to(device).long()
-            SE = SE.to(device).long()
+        for batch_idx, (Drug, SE, DrugMask, SEMsak, Label) in enumerate(test_loader):
+            Drug     = Drug.to(device)
+            SE       = SE.to(device)
             DrugMask = DrugMask.to(device)
-            SEMsak = SEMsak.to(device)
-
-            y_cls = torch.as_tensor(Label, device=device).view(-1).long()   # 0..5
-            y = mid[y_cls]                                                 # log-midpoint
+            SEMsak   = SEMsak.to(device)
+            Label    = torch.FloatTensor([float(item) for item in Label])
 
             out, _, _ = model(Drug, SE, DrugMask, SEMsak)
-            pred = out.view(-1).float()                                     # log-scale
 
-            all_preds.append(pred.cpu())
-            all_y.append(y.cpu())
-            all_ycls.append(y_cls.cpu())
+            # Filter non-zero labels (như paper gốc)
+            location = torch.where(Label != 0)
+            pred = out[location]
+            label = Label[location]
 
-    preds = torch.cat(all_preds).numpy()
-    y = torch.cat(all_y).numpy()
-    y_cls = torch.cat(all_ycls).numpy()
+            total_preds = torch.cat((total_preds, pred.cpu()), 0)
+            total_labels = torch.cat((total_labels, label.cpu()), 0)
 
-    if only_nonzero:
-        mask = (y_cls != 0)
-        y_use, pred_use = y[mask], preds[mask]
-    else:
-        y_use, pred_use = y, preds
+    return total_labels.numpy().flatten(), total_preds.numpy().flatten()
 
-    m = {}
-    m["rmse"] = rmse(y_use, pred_use)
-    m["mae"]  = MAE(y_use, pred_use)
-    scc, ov1, ov5, ov10, ov20 = compute_metrics(y_use, pred_use)
-    m["scc"], m["ov1"], m["ov5"], m["ov10"], m["ov20"] = scc, ov1, ov5, ov10, ov20
-    m["labels"], m["preds"] = y_use, pred_use
-    return m
 
-#   - y_true = (label!=0)
-#   - score  = pred (continuous)  -> AUC/AUPR should use continuous score
-def evaluate_binary_from_regression(model, device, loader, threshold=0.5):
+# =========================================================
+# Evaluate (như paper gốc - binary metrics)
+# =========================================================
+def evaluate(model, device, test_loader):
+    total_preds = torch.Tensor()
+    total_label = torch.Tensor()
+    singleDrug_auc = []
+    singleDrug_aupr = []
+    
     model.eval()
-    all_preds = []
-    all_labels = []
+    torch.cuda.manual_seed(42)
 
     with torch.no_grad():
-        for Drug, SE, DrugMask, SEMsak, Label in loader:
-            Drug     = Drug.to(device, non_blocking=True)
-            SE       = SE.to(device, non_blocking=True)
-            DrugMask = DrugMask.to(device, non_blocking=True)
-            SEMsak   = SEMsak.to(device, non_blocking=True)
-            Label = torch.tensor(Label, device=device, dtype=torch.float32).view(-1)
+        for batch_idx, (Drug, SE, DrugMask, SEMsak, Label) in enumerate(test_loader):
+            Drug     = Drug.to(device)
+            SE       = SE.to(device)
+            DrugMask = DrugMask.to(device)
+            SEMsak   = SEMsak.to(device)
+            Label    = torch.FloatTensor([float(item) for item in Label])
+            
+            output, _, _ = model(Drug, SE, DrugMask, SEMsak)
+            pred = output.cpu()
 
-            out, _, _ = model(Drug, SE, DrugMask, SEMsak)
-            pred = out.view(-1)
+            total_preds = torch.cat((total_preds, pred), 0)
+            total_label = torch.cat((total_label, Label), 0)
 
-            all_preds.append(pred.detach().cpu())
-            all_labels.append(Label.detach().cpu())
+            # Per-drug metrics
+            pred_np = pred.numpy().flatten()
+            pred_binary = np.where(pred_np > 0.5, 1, 0)
+            label_binary = (Label.numpy().flatten() != 0).astype(int)
 
-    score = torch.cat(all_preds).numpy()               # continuous
-    y_raw = torch.cat(all_labels).numpy()
-    y_true = (y_raw != 0).astype(int)
+            if len(np.unique(label_binary)) > 1:  # Need both classes for AUC
+                singleDrug_auc.append(roc_auc_score(label_binary, pred_binary))
+                singleDrug_aupr.append(average_precision_score(label_binary, pred_binary))
 
-    # AUC/AUPR: use continuous scores
-    auc_all = roc_auc_score(y_true, score)
-    aupr_all = average_precision_score(y_true, score)
+    drugAUC = sum(singleDrug_auc) / len(singleDrug_auc) if singleDrug_auc else 0.0
+    drugAUPR = sum(singleDrug_aupr) / len(singleDrug_aupr) if singleDrug_aupr else 0.0
+    
+    total_preds = total_preds.numpy()
+    total_label = total_label.numpy()
 
-    # precision/recall/acc: need binary prediction
-    y_pred = (score > threshold).astype(int)
-    precision = precision_score(y_true, y_pred, zero_division=0)
-    recall = recall_score(y_true, y_pred, zero_division=0)
-    accuracy = accuracy_score(y_true, y_pred)
+    # Binary conversion
+    total_pre_binary = np.where(total_preds > 0.5, 1, 0)
+    label01 = np.where(total_label != 0, 1, total_label)
 
-    return auc_all, aupr_all, precision, recall, accuracy
+    precision = precision_score(label01, total_pre_binary)
+    recall = recall_score(label01, total_pre_binary)
+    accuracy = accuracy_score(label01, total_pre_binary)
+
+    # Overall AUC/AUPR
+    pos = np.squeeze(total_preds[np.where(total_label)])
+    pos_label = np.ones(len(pos))
+    neg = np.squeeze(total_preds[np.where(total_label == 0)])
+    neg_label = np.zeros(len(neg))
+
+    y = np.hstack((pos, neg))
+    y_true = np.hstack((pos_label, neg_label))
+    
+    auc_all = roc_auc_score(y_true, y)
+    aupr_all = average_precision_score(y_true, y)
+
+    return auc_all, aupr_all, drugAUC, drugAUPR, precision, recall, accuracy
 
 
-def main_fold(train_loader, val_loader, test_loader,
-              modeling, lr, num_epoch, weight_decay, log_interval,
-              cuda_name, save_model, fold_id,
-              select_metric="rmse",
-              lambda_exist=0.2, exist_margin=0.5, grad_clip=1.0):
+# =========================================================
+# Main training loop (SIMPLIFIED - như paper gốc)
+# =========================================================
+def main_fold(train_loader, test_loader, modeling, lr, num_epoch, 
+              weight_decay, log_interval, cuda_name, save_model, fold_id):
 
     print('\n=======================================================================================')
     print('model: ', modeling.__name__)
@@ -405,102 +324,88 @@ def main_fold(train_loader, val_loader, test_loader,
     print('Device: ', device)
 
     model = modeling().to(device)
-
-    try:
-        total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    except ValueError:
-        model.eval()
-        with torch.no_grad():
-            for Drug, SE, DrugMask, SEMsak, _ in train_loader:
-                Drug     = Drug.to(device, non_blocking=True)
-                SE       = SE.to(device, non_blocking=True)
-                DrugMask = DrugMask.to(device, non_blocking=True)
-                SEMsak   = SEMsak.to(device, non_blocking=True)
-                _ = model(Drug, SE, DrugMask, SEMsak)
-                break
-        total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f'Total parameters: {total_params}')
 
-    class_weight, counts = compute_class_weights(train_loader, device=device)
-    print(f"[Fold {fold_id}] class counts: {counts.detach().cpu().tolist()}")
-    print(f"[Fold {fold_id}] class weight: {class_weight.detach().cpu().tolist()}")
-
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode="min" if select_metric == "rmse" else "max",
-        factor=0.5,
-        patience=3,
-        verbose=True
-    )
 
     os.makedirs("checkpoints", exist_ok=True)
     os.makedirs("predictResult", exist_ok=True)
 
+    best_rmse = 1e9
     best_epoch = -1
-    best_state = None
-    bad_epochs = 0
-    best_score = float("inf") if select_metric == "rmse" else -float("inf")
+    best_scc = -1e9
+    best_ov1, best_ov5, best_ov10, best_ov20 = 0, 0, 0, 0
+    best_epoch_metrics = -1
 
+    # Training loop - NO VALIDATION, NO EARLY STOPPING (như paper gốc)
     for epoch in range(num_epoch):
         train_loss = trainfun(
-            model=model, device=device, train_loader=train_loader,
-            optimizer=optimizer, epoch=epoch + 1, log_interval=log_interval,
-            class_weight=class_weight,
-            lambda_exist=lambda_exist,
-            exist_margin=exist_margin,
-            grad_clip=grad_clip
+            model=model,
+            device=device,
+            train_loader=train_loader,
+            optimizer=optimizer,
+            epoch=epoch + 1,
+            log_interval=log_interval
         )
 
-        val_m = evaluate_regression(model, device, val_loader, only_nonzero=True)
-
         print(f"\n===== Epoch {epoch + 1} summary =====")
-        print(f"Train Loss: {train_loss['loss']:.5f} (reg={train_loss['reg']:.5f}, exist={train_loss['exist']:.5f})")
-        print('Validation:\tRMSE: {:.5f}\tMAE: {:.5f}\tSCC: {:.5f}'.format(val_m["rmse"], val_m["mae"], val_m["scc"]))
-        print('Overlap@1%: {:.5f}\t5%: {:.5f}\t10%: {:.5f}\t20%: {:.5f}'.format(
-            val_m["ov1"], val_m["ov5"], val_m["ov10"], val_m["ov20"]
+        print(f"Train Loss: {train_loss:.5f}")
+
+        # Intermediate evaluation on test set
+        test_labels, test_preds = predict(model=model, device=device, test_loader=test_loader)
+        test_rMSE = rmse(test_labels, test_preds)
+        test_MAE = MAE(test_labels, test_preds)
+        scc, ov1, ov5, ov10, ov20 = compute_metrics(test_labels, test_preds)
+
+        if test_rMSE < best_rmse:
+            best_rmse = test_rMSE
+            best_epoch = epoch + 1
+
+        if scc > best_scc:
+            best_scc = scc
+            best_ov1, best_ov5, best_ov10, best_ov20 = ov1, ov5, ov10, ov20
+            best_epoch_metrics = epoch + 1
+
+        auc_all, aupr_all, drugAUC, drugAUPR, precision, recall, accuracy = evaluate(
+            model=model, device=device, test_loader=test_loader
+        )
+
+        print('Test:\trMSE: {:.5f}\tMAE: {:.5f}\tSCC: {:.5f}'.format(test_rMSE, test_MAE, scc))
+        print('Overlap@1%: {:.5f}\t5%: {:.5f}\t10%: {:.5f}\t20%: {:.5f}'.format(ov1, ov5, ov10, ov20))
+        print('AUC: {:.5f}\tAUPR: {:.5f}\tDrugAUC: {:.5f}\tDrugAUPR: {:.5f}\t'
+              'Prec: {:.5f}\tRecall: {:.5f}\tACC: {:.5f}'.format(
+            auc_all, aupr_all, drugAUC, drugAUPR, precision, recall, accuracy
         ))
 
-        cur = composite_score(val_m)
-        scheduler.step(cur)
+    # Final prediction after all epochs
+    print("\n正在预测")
+    test_labels, test_preds = predict(model=model, device=device, test_loader=test_loader)
 
-        improved = (cur < best_score) if select_metric == "rmse" else (cur > best_score)
-        if improved:
-            best_score = cur
-            best_epoch = epoch + 1
-            best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-            bad_epochs = 0
+    np.save(f'predictResult/test_labels_fold{fold_id}.npy', test_labels)
+    np.save(f'predictResult/test_preds_fold{fold_id}.npy', test_preds)
 
-            if save_model:
-                torch.save(best_state, f"checkpoints/fold{fold_id}_best_val_{select_metric}.pt")
-        else:
-            bad_epochs += 1
+    test_rMSE = rmse(test_labels, test_preds)
+    test_MAE = MAE(test_labels, test_preds)
+    scc, ov1, ov5, ov10, ov20 = compute_metrics(test_labels, test_preds)
 
+    auc_all, aupr_all, drugAUC, drugAUPR, precision, recall, accuracy = evaluate(
+        model=model, device=device, test_loader=test_loader
+    )
 
-    # Load best and final test once
-    if best_state is not None:
-        model.load_state_dict(best_state, strict=True)
-    print(f"\n[Fold {fold_id}] Loaded best model from epoch {best_epoch} (best val {select_metric}={best_score:.5f})")
-
-    test_m = evaluate_regression(model, device, test_loader, only_nonzero=True)
-
-    print("\n===== FINAL TEST =====")
-    print('Test:\tRMSE: {:.5f}\tMAE: {:.5f}\tSCC: {:.5f}'.format(test_m["rmse"], test_m["mae"], test_m["scc"]))
-    print('Overlap@1%: {:.5f}\t5%: {:.5f}\t10%: {:.5f}\t20%: {:.5f}'.format(
-        test_m["ov1"], test_m["ov5"], test_m["ov10"], test_m["ov20"]
+    print("\n===== FINAL TEST RESULTS =====")
+    print('RMSE: {:.5f}\tMAE: {:.5f}\tSCC: {:.5f}'.format(test_rMSE, test_MAE, scc))
+    print('Overlap@1%: {:.5f}\t5%: {:.5f}\t10%: {:.5f}\t20%: {:.5f}'.format(ov1, ov5, ov10, ov20))
+    print('AUC: {:.5f}\tAUPR: {:.5f}\tDrugAUC: {:.5f}\tDrugAUPR: {:.5f}\t'
+          'Prec: {:.5f}\tRecall: {:.5f}\tACC: {:.5f}'.format(
+        auc_all, aupr_all, drugAUC, drugAUPR, precision, recall, accuracy
     ))
 
-    # Optional: binary metrics derived from regression
-    auc_all, aupr_all, precision, recall, accuracy = evaluate_binary_from_regression(model, device, test_loader, threshold=0.5)
-    print('Binary-from-regression:\tAUC: {:.5f}\tAUPR: {:.5f}\tPrec: {:.5f}\tRecall: {:.5f}\tACC: {:.5f}'.format(
-        auc_all, aupr_all, precision, recall, accuracy
-    ))
-
-    np.save(f'predictResult/test_labels_fold{fold_id}.npy', test_m["labels"])
-    np.save(f'predictResult/test_preds_fold{fold_id}.npy',  test_m["preds"])
-
+    print(f"\n>>>>> FOLD {fold_id} FINISHED")
+    print(f">>>>> BEST RMSE: {best_rmse:.5f} at epoch {best_epoch}")
+    print(f">>>>> BEST SCC: {best_scc:.5f} at epoch {best_epoch_metrics}")
+    print(f">>>>> BEST Overlaps: 1%={best_ov1:.5f}, 5%={best_ov5:.5f}, "
+          f"10%={best_ov10:.5f}, 20%={best_ov20:.5f}")
 
 
 if __name__ == '__main__':
@@ -513,11 +418,6 @@ if __name__ == '__main__':
     parser.add_argument('--cuda_name', type=str, required=False, default='cuda')
     parser.add_argument('--save_model', action='store_true', default=True)
 
-    # val split + early stop
-    parser.add_argument('--val_ratio', type=float, default=0.1)
-    # parser.add_argument('--patience', type=int, default=10)
-    parser.add_argument('--select_metric', type=str, default='rmse', choices=['rmse', 'scc'])
-
     args = parser.parse_args()
 
     modeling = [Trans][args.model]
@@ -528,21 +428,16 @@ if __name__ == '__main__':
     cuda_name = args.cuda_name
     save_model = args.save_model
 
-    # -----------------------------
-    # 1) Build balanced samples (author)
-    # -----------------------------
-    addition_negative_sample, final_positive_sample, final_negative_sample = Extract_positive_negative_samples(
-        drug_side, addition_negative_number='all'
-    )
+    # Build balanced samples
+    addition_negative_sample, final_positive_sample, final_negative_sample = \
+        Extract_positive_negative_samples(drug_side, addition_negative_number='all')
 
     final_sample = final_positive_sample
     X = final_sample[:, :]
-    # labels for stratification
     data_y = [int(float(X[i, 2])) for i in range(X.shape[0])]
 
     drug_dict, drug_smile = load_drug_smile(SMILES_file)
 
-    # data_x: (SE_id, Drug_id) ; data: (SE_id, SMILES, Label)
     data_x = []
     data = []
     for i in range(X.shape[0]):
@@ -557,60 +452,34 @@ if __name__ == '__main__':
     data_x = np.array(data_x, dtype=object)
     data_y = np.array(data_y, dtype=int)
 
-    # -----------------------------
-    # 2) Outer 5-fold CV
-    # -----------------------------
+    # 5-fold CV (NO inner validation split)
     kfold = StratifiedKFold(5, random_state=1, shuffle=True)
 
-    train_params = {'batch_size': 128, 'shuffle': True,  'num_workers': 8, 'pin_memory': True}
-    eval_params  = {'batch_size': 128, 'shuffle': False, 'num_workers': 8, 'pin_memory': True}
+    params = {'batch_size': 128, 'shuffle': True, 'num_workers': 8, 'pin_memory': True}
 
-    for fold_id, (trainval_idx, test_idx) in enumerate(kfold.split(data_x, data_y)):
+    for fold_id, (train_idx, test_idx) in enumerate(kfold.split(data_x, data_y)):
         print(f"\n====================== FOLD {fold_id} ======================")
 
-        # -----------------------------
-        # 3) Inner split: train/val from trainval (stratified)
-        # -----------------------------
-        trainval_y = data_y[trainval_idx]
-        sss = StratifiedShuffleSplit(n_splits=1, test_size=args.val_ratio, random_state=1 + fold_id)
-        train_rel, val_rel = next(sss.split(np.zeros_like(trainval_y), trainval_y))
-
-        train_idx = trainval_idx[train_rel]
-        val_idx   = trainval_idx[val_rel]
-
         data_train = data[train_idx]
-        data_val   = data[val_idx]
         data_test  = data[test_idx]
 
-        # -----------------------------
-        # 4) Build SE features from TRAIN ONLY (NO LEAKAGE)
-        # -----------------------------
+        # Build SE features from TRAIN ONLY
         identify_sub_fold(data_train.tolist(), fold_id=fold_id)
 
-        # -----------------------------
-        # 5) Build DataFrames
-        # -----------------------------
+        # Build DataFrames
         df_train = pd.DataFrame(data=data_train.tolist(), columns=['SE_id', 'Drug_smile', 'Label'])
-        df_val   = pd.DataFrame(data=data_val.tolist(),   columns=['SE_id', 'Drug_smile', 'Label'])
         df_test  = pd.DataFrame(data=data_test.tolist(),  columns=['SE_id', 'Drug_smile', 'Label'])
 
-        # -----------------------------
-        # 6) Datasets + Loaders
-        # -----------------------------
+        # Datasets + Loaders
         training_set = Data_Encoder(df_train.index.values, df_train.Label.values, df_train, fold_id)
-        val_set      = Data_Encoder(df_val.index.values,   df_val.Label.values,   df_val,   fold_id)
         testing_set  = Data_Encoder(df_test.index.values,  df_test.Label.values,  df_test,  fold_id)
 
-        training_loader = torch.utils.data.DataLoader(training_set, **train_params)
-        val_loader      = torch.utils.data.DataLoader(val_set,      **eval_params)
-        testing_loader  = torch.utils.data.DataLoader(testing_set,  **eval_params)
+        training_loader = torch.utils.data.DataLoader(training_set, **params)
+        testing_loader  = torch.utils.data.DataLoader(testing_set,  **params)
 
-        # -----------------------------
-        # 7) Train with validation selection, test once at end
-        # -----------------------------
+        # Train (NO validation set, NO early stopping)
         main_fold(
             train_loader=training_loader,
-            val_loader=val_loader,
             test_loader=testing_loader,
             modeling=modeling,
             lr=lr,
@@ -619,6 +488,5 @@ if __name__ == '__main__':
             log_interval=log_interval,
             cuda_name=cuda_name,
             save_model=save_model,
-            fold_id=fold_id,
-            select_metric=args.select_metric
+            fold_id=fold_id
         )
