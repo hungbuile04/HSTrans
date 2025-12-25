@@ -201,14 +201,14 @@ def trainfun(model, device, train_loader, optimizer, epoch, log_interval):
         optimizer.step()
         avg_loss.append(loss.item())
 
-        if batch_idx % log_interval == 0:
-            print('Train epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-                epoch,
-                (batch_idx + 1) * len(Label),
-                len(train_loader.dataset),
-                100. * (batch_idx + 1) / len(train_loader),
-                loss.item()
-            ))
+        # if batch_idx % log_interval == 0:
+        #     print('Train epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
+        #         epoch,
+        #         (batch_idx + 1) * len(Label),
+        #         len(train_loader.dataset),
+        #         100. * (batch_idx + 1) / len(train_loader),
+        #         loss.item()
+        #     ))
 
     return sum(avg_loss) / len(avg_loss)
 
@@ -455,7 +455,7 @@ if __name__ == '__main__':
     # 5-fold CV (NO inner validation split)
     kfold = StratifiedKFold(5, random_state=1, shuffle=True)
 
-    params = {'batch_size': 128, 'shuffle': True, 'num_workers': 8, 'pin_memory': True}
+    params = {'batch_size': 128, 'shuffle': True, 'num_workers': 4, 'pin_memory': True}
 
     for fold_id, (train_idx, test_idx) in enumerate(kfold.split(data_x, data_y)):
         print(f"\n====================== FOLD {fold_id} ======================")
