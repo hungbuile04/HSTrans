@@ -66,6 +66,29 @@ def loss_fun(output, label):
     """Simple MSE loss - exactly as in original HSTrans paper"""
     return torch.sum((output - label) ** 2)
 
+# Quantization loss (soft-min to nearest integer 1..5)
+def quantization_loss(y_hat, gamma=10.0, lam=0.05):
+    # y_hat: tensor shape (B,) continuous outputs
+    ks = torch.arange(1, 6, device=y_hat.device).float()   # [1,2,3,4,5]
+    d = torch.abs(y_hat.unsqueeze(1) - ks.unsqueeze(0))   # (B,5)
+    w = torch.exp(-gamma * d)                             # (B,5)
+    w = w / (w.sum(dim=1, keepdim=True) + 1e-12)          # normalize
+    lq = (w * d).sum(dim=1).mean()                        # mean over batch
+    return lam * lq
+
+# Hybrid loss: MSE + CE + quantization
+# y_reg: (B,) floats (model regression output)
+# logits: (B,5) class logits (model classification head)
+# labels: (B,) ints in {1,2,3,4,5}
+# Hybrid đơn giản: MSE + quantization (CHỈ 2 THAM SỐ: y_reg, labels)
+def hybrid_loss(output, labels, gamma=1.0, lam=50.0, alpha=1.0):
+    output = output.to('cuda')
+    labels = labels.to('cuda')
+
+    base_loss = torch.sum((output - labels) ** 2)  
+    ql = quantization_loss(output, gamma=gamma, lam=lam)
+
+    return alpha * base_loss + ql
 
 # =========================================================
 # Build SE_sub_index from TRAIN only (no leakage)
