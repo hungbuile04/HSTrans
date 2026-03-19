@@ -239,7 +239,7 @@ class Encoder_MultipleLayers(nn.Module):
         return hidden_states
 
 # Mamba block
-class SimpleMamba(nn.Module):
+class MambaBlock(nn.Module):
     def __init__(self, d_model):
         super().__init__()
 
@@ -281,7 +281,7 @@ class EncoderMamba(nn.Module):
                  attention_probs_dropout_prob,
                  hidden_dropout_prob):
 
-        super(Encoder, self).__init__()
+        super().__init__()
 
         # ===== 2 Mamba blocks =====
 
