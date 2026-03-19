@@ -238,3 +238,113 @@ class Encoder_MultipleLayers(nn.Module):
             hidden_states = layer_module(hidden_states, attention_mask, fusion)
         return hidden_states
 
+# Mamba block
+class SimpleMamba(nn.Module):
+    def __init__(self, d_model):
+        super().__init__()
+
+        self.in_proj = nn.Linear(d_model, d_model)
+
+        self.conv = nn.Conv1d(
+            d_model,
+            d_model,
+            kernel_size=3,
+            padding=1,
+            groups=d_model
+        )
+
+        self.out_proj = nn.Linear(d_model, d_model)
+
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(self, x):
+        # x = (B, L, D)
+
+        h = self.in_proj(x)
+
+        h = h.transpose(1, 2)
+        h = self.conv(h)
+        h = h.transpose(1, 2)
+
+        h = torch.relu(h)
+
+        h = self.out_proj(h)
+
+        return self.norm(x + h)
+
+class EncoderMamba(nn.Module):
+
+    def __init__(self,
+                 hidden_size,
+                 intermediate_size,
+                 num_attention_heads,
+                 attention_probs_dropout_prob,
+                 hidden_dropout_prob):
+
+        super(Encoder, self).__init__()
+
+        # ===== 2 Mamba blocks =====
+
+        self.mamba1 = MambaBlock(hidden_size)
+        self.mamba2 = MambaBlock(hidden_size)
+
+        # ===== FFN =====
+
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_size, intermediate_size),
+            nn.GELU(),
+            nn.Linear(intermediate_size, hidden_size),
+        )
+
+        self.norm = nn.LayerNorm(hidden_size)
+
+        self.dropout = nn.Dropout(hidden_dropout_prob)
+
+
+    def forward(self, hidden_states, attention_mask, fusion):
+
+        # ignore attention_mask, fusion
+        # giữ API để Encoder_MultipleLayers không lỗi
+
+        h = self.mamba1(hidden_states)
+
+        h = self.mamba2(h)
+
+        f = self.ffn(h)
+
+        f = self.dropout(f)
+
+        out = self.norm(h + f)
+
+        return out
+
+class Encoder_MultipleLayersMamba(nn.Module):
+
+    def __init__(self, n_layer, hidden_size, intermediate_size,
+                 num_attention_heads, attention_probs_dropout_prob, hidden_dropout_prob):
+
+        super(Encoder_MultipleLayersMamba, self).__init__()
+
+        layer = EncoderMamba(
+            hidden_size,
+            intermediate_size,
+            num_attention_heads,
+            attention_probs_dropout_prob,
+            hidden_dropout_prob
+        )
+
+        self.layer = nn.ModuleList(
+            [copy.deepcopy(layer) for _ in range(n_layer)]
+        )
+
+
+    def forward(self, hidden_states, attention_mask, fusion):
+
+        for layer_module in self.layer:
+            hidden_states = layer_module(
+                hidden_states,
+                attention_mask,
+                fusion
+            )
+
+        return hidden_states
