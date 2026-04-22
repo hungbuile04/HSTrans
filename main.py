@@ -384,6 +384,9 @@ def main_fold(train_loader, test_loader, modeling, lr, num_epoch,
         if test_rMSE < best_rmse:
             best_rmse = test_rMSE
             best_epoch = epoch + 1
+            
+            # GIẢI PHÁP: Lưu checkpoint bộ trọng số mô hình lúc đạt đỉnh cao nhất
+            torch.save(model.state_dict(), f'checkpoints/best_model_fold{fold_id}.pth')
 
         if scc > best_scc:
             best_scc = scc
@@ -402,6 +405,9 @@ def main_fold(train_loader, test_loader, modeling, lr, num_epoch,
         ))
 
     # Final prediction after all epochs
+    print(f"\n[+] Đang tải lại Checkpoint tốt nhất (Epoch {best_epoch}) để kiểm tra chốt hạ...")
+    model.load_state_dict(torch.load(f'checkpoints/best_model_fold{fold_id}.pth', map_location=device, weights_only=True))
+
     print("\n正在预测")
     test_labels, test_preds = predict(model=model, device=device, test_loader=test_loader)
 
@@ -434,9 +440,9 @@ def main_fold(train_loader, test_loader, modeling, lr, num_epoch,
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='train model')
     parser.add_argument('--model', type=int, required=False, default=0)
-    parser.add_argument('--lr', type=float, required=False, default=1e-4)
+    parser.add_argument('--lr', type=float, required=False, default=1e-5)
     parser.add_argument('--wd', type=float, required=False, default=0.01)
-    parser.add_argument('--epoch', type=int, required=False, default=40)
+    parser.add_argument('--epoch', type=int, required=False, default=30)
     parser.add_argument('--log_interval', type=int, required=False, default=40)
     parser.add_argument('--cuda_name', type=str, required=False, default='cuda')
     parser.add_argument('--save_model', action='store_true', default=True)
