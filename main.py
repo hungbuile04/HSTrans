@@ -475,12 +475,18 @@ if __name__ == '__main__':
     data_x = np.array(data_x, dtype=object)
     data_y = np.array(data_y, dtype=int)
 
-    # 5-fold CV (NO inner validation split)
-    kfold = StratifiedKFold(5, random_state=1, shuffle=True)
+    from sklearn.model_selection import GroupKFold
+
+    # 5-fold CV (COLD-START DRUG SPLIT) - SỬA LỖI DATA LEAKAGE 
+    # Thay vì StratifiedKFold, ta dùng GroupKFold nhóm theo drug_id
+    kfold = GroupKFold(n_splits=5)
 
     params = {'batch_size': 128, 'shuffle': True, 'num_workers': 4, 'pin_memory': True}
 
-    for fold_id, (train_idx, test_idx) in enumerate(kfold.split(data_x, data_y)):
+    # groups là mảng chứa drug_id tương ứng với từng sample để GroupKFold gom nhóm
+    groups = [x[1] for x in data_x]
+
+    for fold_id, (train_idx, test_idx) in enumerate(kfold.split(data_x, data_y, groups=groups)):
         print(f"\n====================== FOLD {fold_id} ======================")
 
         data_train = data[train_idx]
